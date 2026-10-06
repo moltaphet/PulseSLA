@@ -5,7 +5,7 @@ export const metadata = {
   description: "How PulseSLA turns infrastructure SLAs into autonomous, consensus-settled parametric insurance.",
 };
 
-export const TEST_COUNTS = { contract: 170, frontend: 387 } as const;
+export const TEST_COUNTS = { contract: 176, frontend: 390 } as const;
 const REPO_URL = process.env.NEXT_PUBLIC_REPO_URL;
 const DOCS_URL = "https://docs.genlayer.com";
 
@@ -24,8 +24,8 @@ const SAFEGUARDS = [
 ] as const;
 
 const HARDENING = [
-  { title: "Rogue-leader bound", body: "Validators reject a leader whose block height is more than 10 blocks from their own observation, or negative or absurd. One Byzantine leader cannot poison the stored block height." },
-  { title: "Net-asset redemptions", body: "Shares are priced on assets minus reserved payouts. An underwriter who exits during a staged claim takes their share of the pending loss with them." },
+  { title: "Conservative block heights", body: "Validators accept a leader's block height only if it is at most 2 blocks ahead of their own reading (and at most 10 behind). The stored height is a lower bound, so a Byzantine leader cannot fabricate stale-block verdicts, and frozen nodes are still caught." },
+  { title: "Deposits freeze during claims", body: "Deposits are priced on gross assets and rejected while any claim is reserved, so a staged breach cannot buy discounted shares. Withdrawals use net assets, so an early exit takes its share of the pending loss." },
   { title: "Claim velocity ceiling", body: "At most 30% of pool assets can be paid per 24-hour epoch, and the first claim of an epoch always goes through. Mass breaches are paid over days, never in one step." },
 ] as const;
 
@@ -33,7 +33,7 @@ const LIMITS = [
   { title: "Self-collusion is bounded, not eliminated", body: "An operator who controls several endpoints on different domains and buys policies from fresh addresses can, after the 7-day vesting period, extract up to the pool's 80% maximum utilization cap. Per-policy, per-domain and per-holder caps, the three-failure and grace rules, and the velocity ceiling limit and slow this, but a fully vested payout can still exceed the attacker's costs at current parameters. Underwriters should size liquidity buffers accordingly." },
   { title: "Uptime comes from triggered samples, not continuous pings", body: "There is no centralized heartbeat. A probe runs only when someone triggers it, at most once per policy interval. Uptime is the healthy share of samples in a 30-day window, not a time-weighted figure. Outages between probes are invisible, and with no probes nothing is detected." },
   { title: "Latency is not enforced on-chain", body: "GenVM exposes no clock that advances across a web request, so measured latency is 0 ms on Studio Next. Status codes, JSON-RPC payloads and stale-block detection are enforced." },
-  { title: "Conservative redemptions and approximations", body: "Redemptions price the full reserved coverage as a pending loss, so a dismissed claim benefits the LPs who stayed. Domain grouping approximates the Public Suffix List, and the 10-block drift bound assumes moderate block times." },
+  { title: "Conservative redemptions and approximations", body: "Redemptions price the full reserved coverage as a pending loss, so a dismissed claim benefits the LPs who stayed, and new deposits pause while any claim is reserved. Domain grouping approximates the Public Suffix List, and strict block-height bounds can cost an occasional probe retry." },
 ] as const;
 
 function Panel({ children, className = "" }: { children: ReactNode; className?: string }) {

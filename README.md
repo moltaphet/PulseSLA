@@ -7,12 +7,12 @@ PulseSLA is parametric downtime insurance for Web3 infrastructure: RPC nodes, in
 | | |
 |---|---|
 | **Network** | GenLayer Studio Next, chain ID `61997` |
-| **Contract** | [`0xCac874c4A68d5Fa275FB1100B65A28F610F1ab5f`](https://explorer-studio-next.genlayer.com/address/0xCac874c4A68d5Fa275FB1100B65A28F610F1ab5f) |
+| **Contract** | [`0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8`](https://explorer-studio-next.genlayer.com/address/0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8) |
 | **RPC** | `https://studio-next.genlayer.com/api` |
 | **Source** | [`contracts/uptime_sla.py`](contracts/uptime_sla.py), GenVM runner `py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng` |
 | **Records** | [`deployments/studio-next.json`](deployments/studio-next.json) (address, ABI, deploy receipt) · [`deployments/studio-next-verification.json`](deployments/studio-next-verification.json) (live transactions) |
 
-> **Hardened build.** This deployment includes the rogue-leader block bound, net-asset redemptions, registrable-domain caps and the claim velocity ceiling. The previous deployment (`0x1848eeDa503717E58c0D7c411703593d8E54f8C3`) is archived in [`deployments/archive/`](deployments/archive/).
+> **Hardened build.** This deployment includes the asymmetric rogue-leader block bound (conservative `last_block`), gross-priced deposits that freeze while a claim is reserved, net-asset withdrawals, registrable-domain caps and the claim velocity ceiling. Earlier deployments (`0xCac874c4A68d5Fa275FB1100B65A28F610F1ab5f`, before the deposit-freeze fix, and `0x1848eeDa503717E58c0D7c411703593d8E54f8C3`) are archived in [`deployments/archive/`](deployments/archive/).
 >
 > **Testnet instance.** This deployment uses a 60 s activation delay and a 300 s claim grace so a complete probe can be demonstrated in minutes. The contract defaults are 3600 s each. Both values are immutable after deployment.
 >
@@ -80,8 +80,8 @@ Challengers ──bond────▶ │                    (web consensus)    
 | **3 consecutive failures + grace** | Failures must be consecutive, uptime must fall below the floor, a grace period must pass, and a *fresh* consensus round must still see the failure. | A transient glitch or a short, self-inflicted blip does not pay. A recovered node cancels the claim. |
 | **7-day linear vesting** | Payout vests from 25% of coverage at policy start to 100% after 7 days. | A freshly bought policy pays at most about a quarter of coverage. |
 | **Solvency invariant** | Coverage is locked at mint time. `locked_coverage ≤ pool_assets` holds after every operation. A payout reduces both sides equally. | The pool cannot be overdrawn, even if every policy breaches at once. |
-| **Rogue-leader bound** | A validator rejects a leader whose block height differs from the validator's own observation by more than **10 blocks**, or is negative, zero on a healthy result, non-integer or above 2⁵³. | An isolated Byzantine leader cannot poison the stored `last_block` to induce, or hide, stale-block verdicts beyond that drift. |
-| **Net-asset redemptions** | Shares are priced on `assets − reserved_payouts` for both deposits and withdrawals. | An underwriter who exits while a claim is staged takes their pro-rata share of that pending loss with them, instead of leaving it to the LPs who stay. |
+| **Rogue-leader bound** | The contract stores the *leader's* block height (validators return only a vote), so a validator accepts a leader height only if it is at most **2 blocks ahead** of its own reading and at most **10 behind**; negative, zero-on-success, non-integer or above-2⁵³ heights are rejected. | The stored `last_block` is a conservative lower bound of what validators saw. A Byzantine leader cannot inflate it to fabricate `STALE_BLOCK` verdicts on a slow chain. |
+| **Gross deposits, frozen during claims; net withdrawals** | Deposits are priced on gross assets and are **rejected (`[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]`) while any claim is reserved**. Withdrawals are priced on `assets − reserved_payouts`. | Nobody can stage a breach, buy discounted shares, and profit when the claim is dismissed. An LP who exits during a staged claim takes their share of that pending loss with them. Existing LP shares are never diluted by a deposit. |
 | **Registrable-domain cap** | The 20% per-host cap is keyed by eTLD+1 (`a.node.io`, `b.node.io` and `c.node.io` share one cap). Platform suffixes such as `*.vercel.app` and `*.github.io` count each tenant separately. | Cycling subdomains does not bypass the cap. |
 | **Claim velocity ceiling** | Payouts per 24 h epoch are capped at 30% of pool assets. The first payout of an epoch is always allowed. Blocked claims stay staged and reserved. | Simultaneous breaches are paid over several epochs, never in one step. The queue always drains, and the 14-day settlement window outlasts it. |
 
@@ -94,8 +94,8 @@ These are disclosed on purpose. The safeguards above **bound and slow** the loss
 1. **Operator self-collusion is bounded, not eliminated.** An operator who controls several endpoints, on different registrable domains, and buys policies from several fresh addresses can, after the 7-day vesting period, stage claims by taking those endpoints down. In aggregate this can extract **up to the pool's 80% maximum utilization cap**. The mechanics that limit it are the per-policy (10%), per-domain (20%) and per-holder (20%) caps, the 3-failure-plus-grace rule, and the claim velocity ceiling, which spreads payouts over several epochs. Staged claims are public on-chain for the whole grace period, so underwriters can see the pressure building. The attacker still pays premiums and bears the cost of their own downtime. At the current parameters, however, a fully vested payout (100% of coverage) can exceed those costs. The parameters (caps, vesting length, premium rates) are the primary defence and are set at deployment or in the contract source, and **underwriters should size liquidity buffers with this scenario in mind**. The protocol has no identity layer, so it cannot tell fresh addresses apart from independent customers.
 2. **Uptime is measured from transaction-triggered samples, not continuous monitoring.** There is no centralized pinger and no wall-clock heartbeat. A probe happens only when someone calls `trigger_probe`, no more often than the policy's interval. Reported uptime is the ratio of healthy to total samples in a 30-day window, and is not time-weighted. An outage that falls between probes is invisible. If nobody probes, nothing is detected. The incentive to probe is the refunded bond when a failure is found, plus underwriters' and policyholders' own interest in running keepers.
 3. **Latency is not enforced on-chain** (see §6).
-4. **Redemptions are priced conservatively.** Shares redeem at assets minus the *full* reserved coverage. If a staged claim is later dismissed, or pays less than full coverage because of vesting, the difference accrues to the LPs who stayed, not to those who exited meanwhile.
-5. **The 10-block drift bound assumes moderate block times.** On very fast chains, validators measuring a few seconds apart can differ by more than 10 blocks. Probes on such endpoints may fail to reach consensus and be retried.
+4. **Redemptions are priced conservatively, and deposits pause during claims.** Shares redeem at assets minus the *full* reserved coverage. If a staged claim is later dismissed, or pays less than full coverage because of vesting, the difference accrues to the LPs who stayed, not to those who exited meanwhile. New deposits are rejected for as long as any claim is reserved (the grace period, plus any velocity-queue wait), so fresh liquidity cannot enter during that time.
+5. **Block-height bounds trade liveness for safety.** A validator reading more than 2 blocks *behind* the leader (for example a load-balanced RPC with an inconsistent backend), or more than 10 *ahead*, rejects the round and the probe is retried with another leader. The stale check itself is unchanged (`block ≤ last_block` after at least 60 s): a rule such as "stale only if `block + 10 ≤ last_block`" was considered and rejected, because it would stop a genuinely frozen node (where the two heights are equal) from ever being detected.
 6. **Domain grouping is an approximation.** A full Public Suffix List cannot be embedded in a contract. The contract uses the last two labels plus a built-in list of common multi-label and hosting-platform suffixes.
 7. **Payouts can be delayed by the velocity ceiling.** In a mass-breach event a claim may wait several epochs. The first claim of each epoch is guaranteed.
 8. Validators are assumed to be honest-majority, as in all GenLayer contracts.
@@ -122,7 +122,8 @@ These are disclosed on purpose. The safeguards above **bound and slow** the loss
 | Breach rule | 3 consecutive failures, uptime below floor over a 30-day window |
 | Settlement window | 14 days after grace, then the claim lapses and `expire_policy` releases the capital |
 | Claim velocity | 24 h epochs; payouts capped at 30% of pool assets per epoch (first payout of an epoch always allowed) |
-| Block drift bound | ±10 blocks between leader and validator; heights above 2⁵³ are rejected |
+| Block-height bound | leader ≤ validator + 2 and ≥ validator − 10; heights above 2⁵³ are rejected |
+| Deposits | priced on gross assets; rejected while any claim is reserved |
 | Payout vesting | 25% → 100% linearly over 7 days of policy age |
 | Premium floor | 0.10% of coverage |
 
@@ -137,12 +138,12 @@ Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Un
 | Check | Result |
 |---|---|
 | `genvm-lint check` and `typecheck` | **0 errors** |
-| Contract tests (`pytest`, genlayer-test direct mode) | **170 passing** |
-| Frontend tests (Vitest + React Testing Library) | **387 passing** |
+| Contract tests (`pytest`, genlayer-test direct mode) | **176 passing** |
+| Frontend tests (Vitest + React Testing Library) | **390 passing** |
 | `npm run typecheck && lint && test && build` | pass |
 | Live on-chain verification (Studio Next) | pass (below) |
 
-**Contract tests** cover deposit/withdraw arithmetic and rounding, premium formulas, policy expiry, healthy / HTTP 500-504 / 404 / 429 / unreachable / high-latency / stale-block / bad-payload probes, the real validator function (agreement, disagreement, forged and malformed leader results), staged claims, vesting, dismissal and lapse, the collusion cases above, rejection of unauthorized payouts, the solvency invariant under **eight simultaneous breaches** paid out across epochs, Byzantine-leader block bounds, LP early-exit fairness, apex-domain caps, and claim velocity.
+**Contract tests** cover deposit/withdraw arithmetic and rounding, premium formulas, policy expiry, healthy / HTTP 500-504 / 404 / 429 / unreachable / high-latency / stale-block / bad-payload probes, the real validator function (agreement, disagreement, forged and malformed leader results), staged claims, vesting, dismissal and lapse, the collusion cases above, rejection of unauthorized payouts, the solvency invariant under **eight simultaneous breaches** paid out across epochs, Byzantine-leader block bounds and stale-block poisoning, the deposit-arbitrage PoC, LP early-exit fairness, apex-domain caps, and claim velocity.
 
 **Frontend tests** include premium parity against **180 quotes generated from the contract itself**, parity of the URL guard with the contract's accepted/rejected lists, an in-memory protocol engine that mirrors the contract's state machine, wallet and protocol hooks, a mocked `genlayer-js` client, and every page.
 
@@ -181,7 +182,7 @@ source .venv/bin/activate
 
 # Contract: lint and test
 genvm-lint check contracts/uptime_sla.py
-python -m pytest tests -q                         # 170 tests
+python -m pytest tests -q                         # 176 tests
 
 # In-memory end-to-end simulation: seed → policy → degrade → probe → payout
 python scripts/simulate_outage.py                 # --scenario flap: node recovers, claim dismissed

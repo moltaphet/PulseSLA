@@ -11,7 +11,7 @@ import { UptimeBadge } from "@/components/UptimeBadge";
 import { DemoClient } from "@/lib/chain/demo";
 import { quotePremium } from "@/lib/pricing";
 import { ATTO, daysToBlocks, formatGen } from "@/lib/units";
-import { makeDemo, renderWithProtocol } from "./utils";
+import { makeDemo, makeDemoUnfrozen, renderWithProtocol } from "./utils";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
@@ -32,7 +32,7 @@ describe("UnderwritingPortal", () => {
 
   it("validates deposit amounts before enabling the button", async () => {
     const user = userEvent.setup();
-    renderWithProtocol(<UnderwritingPortal />);
+    renderWithProtocol(<UnderwritingPortal />, { client: makeDemoUnfrozen() });
     const input = await screen.findByLabelText(/amount to deposit/i);
     const submit = screen.getByRole("button", { name: /deposit to pool/i });
     expect(submit).toBeDisabled();
@@ -49,13 +49,24 @@ describe("UnderwritingPortal", () => {
 
   it("previews shares and deposits into the pool", async () => {
     const user = userEvent.setup();
-    const { client } = renderWithProtocol(<UnderwritingPortal />);
+    const { client } = renderWithProtocol(<UnderwritingPortal />, { client: makeDemoUnfrozen() });
     const before = demo(client).sim.metrics().tvl;
     await user.type(await screen.findByLabelText(/amount to deposit/i), "10");
     expect(screen.getByText("Shares minted")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /deposit to pool/i }));
     await waitFor(() => expect(demo(client).sim.metrics().tvl).toBe(before + 10n * ATTO));
     await waitFor(() => expect(screen.getByLabelText(/amount to deposit/i)).toHaveValue(""));
+  });
+
+  it("freezes deposits (but not withdrawals) while a claim is pending", async () => {
+    const user = userEvent.setup();
+    renderWithProtocol(<UnderwritingPortal />); // the seeded world has a staged claim on relay.nimbus-bridge.net
+    const submit = await screen.findByRole("button", { name: /deposits frozen/i });
+    expect(submit).toBeDisabled();
+    expect(screen.getByRole("status", { name: "" })).toHaveTextContent(/Deposits are frozen while a staged claim is reserved/);
+    await user.click(screen.getByRole("tab", { name: "Withdraw" }));
+    expect(screen.queryByText(/Deposits are frozen/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /withdraw from pool/i })).toBeInTheDocument();
   });
 
   it("limits withdrawals to the unlocked portion of the position", async () => {

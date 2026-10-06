@@ -113,7 +113,8 @@ LATENCY_TOLERANCE_BPS = 2000  # validators accept latency verdicts +-20% of limi
 
 # Rogue-leader bounds (see _verdicts_agree): independent observations of one
 # chain can differ by a few blocks, never by more than this.
-MAX_BLOCK_DRIFT = 10
+MAX_BLOCK_DRIFT = 10  # leader may be up to this many blocks BEHIND a validator
+MAX_BLOCK_AHEAD = 2  # ...but at most this many AHEAD, so a stored height is a conservative lower bound
 MAX_BLOCK_HEIGHT = 2**53  # beyond any real chain; rejects absurd leader values
 
 # Claim velocity: payouts per epoch are capped at a share of pool assets, so a
@@ -121,6 +122,7 @@ MAX_BLOCK_HEIGHT = 2**53  # beyond any real chain; rejects absurd leader values
 EPOCH_SECONDS = 24 * 3600
 MAX_EPOCH_PAYOUT_BPS = 3000  # 30% of pool assets per epoch
 ERR_VELOCITY = "[VELOCITY_LIMIT]"
+ERR_DEPOSITS_FROZEN = "[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]"
 
 # Multi-label public suffixes, so that exposure is grouped by registrable domain
 # (eTLD+1) rather than by subdomain. A full Public Suffix List cannot be embedded
@@ -328,10 +330,13 @@ def _verdicts_agree(leaders_res, leader_fn, max_latency_ms: int, rpc_mode: bool)
 
     1. The healthy/failing verdict must match (the failure CLASS need not).
     2. The leader's block height is bounded against this validator's OWN
-       observation: |leader - validator| <= MAX_BLOCK_DRIFT. A Byzantine leader
-       therefore cannot poison the stored `last_block` (and so induce, or hide,
-       STALE_BLOCK verdicts) beyond that drift. Negative, zero-on-success or
-       absurd heights are rejected outright.
+       observation, asymmetrically: validator - MAX_BLOCK_DRIFT <= leader <=
+       validator + MAX_BLOCK_AHEAD. The contract stores the LEADER's height as
+       `last_block` (validators return only a vote), so requiring the leader not
+       to be ahead of any accepting validator makes the stored value a
+       conservative lower bound of what the validators saw. A Byzantine leader
+       cannot inflate it to fabricate STALE_BLOCK verdicts on a slow chain.
+       Negative, zero-on-success or absurd heights are rejected outright.
     3. A verdict split that is purely a latency call within +-20% of the limit is
        tolerated, because latency jitter between vantage points is not a lie."""
     if not isinstance(leaders_res, gl.vm.Return):
@@ -357,7 +362,8 @@ def _verdicts_agree(leaders_res, leader_fn, max_latency_ms: int, rpc_mode: bool)
     my_block = mine["block"]
     if lead_block > 0:
         if my_block > 0:
-            if abs(lead_block - my_block) > MAX_BLOCK_DRIFT:
+            delta = lead_block - my_block
+            if delta > MAX_BLOCK_AHEAD or -delta > MAX_BLOCK_DRIFT:
                 return False
         elif lead["reason"] in (R_OK, R_HIGH_LATENCY):
             # The leader's height would be stored but this validator cannot
@@ -572,15 +578,20 @@ class PulseSLA(gl.contract.Contract):
         amount = int(gl.message.value)
         if amount < MIN_DEPOSIT:
             raise gl.vm.UserError(f"{ERR_PARAMS} deposit below minimum")
-        assets = int(self.pool_assets)
-        net = self._net_assets()
+        # Deposits are frozen while any claim is reserved. Pricing them on net assets
+        # would let someone stage a breach, buy discounted shares, and profit when
+        # the claim is dismissed; pricing on gross would instead dilute the LPs who
+        # carry the pending risk. Freezing removes the window entirely.
+        if int(self.reserved_payouts) > 0:
+            raise gl.vm.UserError(f"{ERR_DEPOSITS_FROZEN} a staged claim is reserved; deposits reopen when it settles")
+        assets = int(self.pool_assets)  # gross assets (== net, since nothing is reserved)
         total = int(self.total_shares)
         if total == 0:
             minted = amount
         else:
-            if net == 0:
-                raise gl.vm.UserError(f"{ERR_STATE} pool has no unreserved assets; deposits closed")
-            minted = amount * total // net  # priced on assets net of pending claims
+            if assets == 0:
+                raise gl.vm.UserError(f"{ERR_STATE} pool has no assets; deposits closed")
+            minted = amount * total // assets
         if minted == 0:
             raise gl.vm.UserError(f"{ERR_PARAMS} deposit too small for current share price")
         who = _hex(gl.message.sender_address)

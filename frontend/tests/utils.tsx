@@ -14,6 +14,17 @@ export function makeDemo(): DemoClient {
   return new DemoClient(createDemoWorld(NOW), 0);
 }
 
+/** The demo world with its staged claim dismissed, so nothing is reserved and deposits are open. */
+export function makeDemoUnfrozen(): DemoClient {
+  const c = makeDemo();
+  c.sim.setEndpoint("relay.nimbus-bridge.net", "healthy");
+  c.advance(7200); // past the claim grace period
+  c.sim.settleClaim(DEMO_ACCOUNT, 3, c.sim.cfg.probeBond);
+  c.sim.setEndpoint("rpc.helios-node.io", "healthy");
+  if (c.sim.metrics().reservedPayouts !== 0n) throw new Error("demo world still has reserved claims");
+  return c;
+}
+
 export function renderWithProtocol(
   ui: ReactElement,
   opts: { client?: ProtocolClient; walletProvider?: Eip1193Provider | null } = {},

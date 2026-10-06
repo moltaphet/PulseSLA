@@ -1,10 +1,10 @@
 import { LIMITS } from "./pricing";
 import { formatGen, parseGen } from "./units";
 
-/** Shares minted for a deposit (mirrors `deposit_underwriting`). Priced on `netAssets`: assets minus reserved claims. */
-export function previewDeposit(amount: bigint, netAssets: bigint, totalShares: bigint): bigint {
-  if (totalShares === 0n || netAssets === 0n) return amount;
-  return (amount * totalShares) / netAssets;
+/** Shares minted for a deposit (mirrors `deposit_underwriting`). Priced on GROSS assets; deposits are frozen while any claim is reserved. */
+export function previewDeposit(amount: bigint, grossAssets: bigint, totalShares: bigint): bigint {
+  if (totalShares === 0n || grossAssets === 0n) return amount;
+  return (amount * totalShares) / grossAssets;
 }
 
 /** Shares burned for a withdrawal: rounded up so the pool is never under-charged. */

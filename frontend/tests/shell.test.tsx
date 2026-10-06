@@ -6,7 +6,7 @@ import { ConnectButton } from "@/components/ConnectButton";
 import { TxBanner } from "@/components/TxBanner";
 import { DemoClient } from "@/lib/chain/demo";
 import { useProtocol } from "@/lib/hooks/useProtocol";
-import { fakeWallet, makeDemo, renderWithProtocol } from "./utils";
+import { fakeWallet, makeDemo, makeDemoUnfrozen, renderWithProtocol } from "./utils";
 
 let pathname = "/marketplace";
 vi.mock("next/navigation", () => ({ usePathname: () => pathname, useSearchParams: () => new URLSearchParams() }));
@@ -86,10 +86,17 @@ describe("TxBanner and protocol actions", () => {
 
   it("reports success and clears on dismiss", async () => {
     const user = userEvent.setup();
-    renderWithProtocol(<><TxBanner /><Harness /></>);
+    renderWithProtocol(<><TxBanner /><Harness /></>, { client: makeDemoUnfrozen() });
     await user.click(await screen.findByRole("button", { name: "good-deposit" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Deposit underwriting capital");
     expect(screen.getByTestId("phase")).toHaveTextContent("success");
+  });
+
+  it("surfaces a frozen deposit with its error code while a claim is pending", async () => {
+    const user = userEvent.setup();
+    renderWithProtocol(<><TxBanner /><Harness /></>);
+    await user.click(await screen.findByRole("button", { name: "good-deposit" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]");
   });
 
   it("reports a rejected probe", async () => {

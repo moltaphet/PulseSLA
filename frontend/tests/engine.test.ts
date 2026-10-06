@@ -354,7 +354,23 @@ describe("hardening mirrors the contract", () => {
     expect(sim.get(1).apex).toBe("node.io");
   });
 
-  it("prices redemptions and deposits net of reserved payouts, so an early exit cannot dump a pending loss", () => {
+  it("freezes deposits while a claim is reserved, so a staged breach cannot buy discounted shares", () => {
+    const sim = world();
+    const id = mint(sim, OP, { coverage: 10n * ATTO });
+    stage(sim, id);
+    expect(sim.metrics().reservedPayouts).toBe(10n * ATTO);
+    const shares = sim.metrics().totalShares;
+    revertsWith(() => sim.deposit("0xa", 50n * ATTO), "[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]");
+    expect(sim.metrics().totalShares).toBe(shares);
+    sim.advance(GRACE + 1);
+    sim.setEndpoint(sim.get(id).host, "healthy");
+    sim.settleClaim(BOT, id, BOND); // dismissed
+    expect(sim.metrics().reservedPayouts).toBe(0n);
+    const m = sim.metrics();
+    expect(sim.deposit("0xa", 10n * ATTO)).toBe((10n * ATTO * m.totalShares) / m.tvl); // reopened, gross price
+  });
+
+  it("prices redemptions net of reserved payouts, so an early exit cannot dump a pending loss", () => {
     const sim = new SimProtocol(T0);
     for (const a of [UW, OP, BOT, "0xa"]) sim.fund(a, 10_000n * ATTO);
     sim.deposit("0xa", 50n * ATTO);

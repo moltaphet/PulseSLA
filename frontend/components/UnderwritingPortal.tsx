@@ -19,9 +19,10 @@ export function UnderwritingPortal() {
   const check = tab === "deposit" ? validateDeposit(input, balance) : validateWithdraw(input, pos.value, pos.withdrawable);
   const preview =
     check.amount === null ? null
-    : tab === "deposit" ? { label: "Shares minted", value: previewDeposit(check.amount, metrics.netAssets, metrics.totalShares) }
+    : tab === "deposit" ? { label: "Shares minted", value: previewDeposit(check.amount, metrics.tvl, metrics.totalShares) }
     : { label: "Shares burned", value: previewWithdrawBurn(check.amount, metrics.netAssets, metrics.totalShares) };
   const max = tab === "deposit" ? balance : pos.withdrawable;
+  const frozen = tab === "deposit" && metrics.reservedPayouts > 0n;
 
   const submit = async () => {
     if (check.amount === null) return;
@@ -70,14 +71,19 @@ export function UnderwritingPortal() {
                     className="rounded border border-line px-1.5 py-0.5 text-[10px] font-semibold uppercase text-capital hover:border-capital disabled:text-faint">Max</button>
                 </span>}
               hint={tab === "deposit" ? (balance !== null ? `Wallet balance ${formatGen(balance)} GEN` : undefined) : `Withdrawable now ${formatGen(pos.withdrawable)} GEN of ${formatGen(pos.value)} GEN`} />
+            {frozen && (
+              <p role="status" className="rounded-xl border border-amber-400/30 bg-warn-dim px-4 py-3 text-sm text-amber-200">
+                Deposits are frozen while a staged claim is reserved ({formatGen(metrics.reservedPayouts, 2)} GEN). They reopen when the claim settles. Withdrawals stay open at net asset value.
+              </p>
+            )}
             {preview && (
               <dl className="rounded-lg border border-line bg-bg px-4 py-2">
                 <Row label={preview.label}>{formatGen(preview.value, 6)}</Row>
                 <Row label="Share price">{(Number((metrics.sharePrice * 10_000n) / ATTO) / 10_000).toFixed(4)} GEN</Row>
               </dl>
             )}
-            <Button type="submit" variant="capital" className="w-full" loading={busy} disabled={check.amount === null || !canTransact}>
-              {!canTransact ? "Connect a wallet to continue" : tab === "deposit" ? "Deposit to pool" : "Withdraw from pool"}
+            <Button type="submit" variant="capital" className="w-full" loading={busy} disabled={check.amount === null || !canTransact || frozen}>
+              {frozen ? "Deposits frozen: claim pending" : !canTransact ? "Connect a wallet to continue" : tab === "deposit" ? "Deposit to pool" : "Withdraw from pool"}
             </Button>
             {mode === "live" && <p className="text-xs text-faint">Writes go through GenLayer consensus and take a few seconds to be decided.</p>}
           </form>

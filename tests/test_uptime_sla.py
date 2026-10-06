@@ -909,8 +909,11 @@ class TestByzantineLeader:
         assert env.probe(pid)["block"] == 1_000
         return env, pid
 
-    @pytest.mark.parametrize("block,expected", [(1_000, True), (1_010, True), (990, True), (1_011, False), (989, False)])
-    def test_block_drift_is_bounded_to_ten(self, probed, block, expected):
+    @pytest.mark.parametrize(
+        "block,expected",
+        [(1_000, True), (1_002, True), (1_003, False), (1_010, False), (990, True), (989, False)],
+    )
+    def test_leader_may_trail_by_ten_but_lead_by_at_most_two(self, probed, block, expected):
         env, _ = probed
         assert env.vm.run_validator(leader_result=honest(block)) is expected
 
@@ -938,6 +941,8 @@ class TestByzantineLeader:
         env.rpc(1_005)  # the validator's vantage point is a few blocks ahead: still honest
         assert env.vm.run_validator(leader_result=honest(1_000))
         env.rpc(1_100)  # but not 100 blocks ahead
+        assert not env.vm.run_validator(leader_result=honest(1_000))
+        env.rpc(990)  # a leader 10 ahead of the validator's view is a poisoning attempt
         assert not env.vm.run_validator(leader_result=honest(1_000))
 
     def test_ok_in_rpc_mode_requires_a_height(self, probed):
@@ -1023,12 +1028,41 @@ class TestUnderwriterEarlyExit:
         free = int(env.metrics()["free_liquidity"])
         assert free == tvl - 10 * ATTO
 
-    def test_deposits_during_a_pending_claim_are_priced_at_net_assets(self, env):
+    def test_deposits_are_frozen_while_a_claim_is_reserved(self, env):
         self._two_lps_with_pending_claim(env)
+        assert int(env.metrics()["reserved_payouts"]) > 0
+        shares_before = env.metrics()["total_shares"]
+        with env.vm.expect_revert("[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]"):
+            env.deposit(env.charlie, 10 * ATTO)
+        assert env.metrics()["total_shares"] == shares_before  # nothing was minted
+
+    def test_deposits_reopen_at_the_gross_price_once_the_claim_settles(self, env):
+        pid = self._two_lps_with_pending_claim(env)
+        env.advance(GRACE + 1)
+        env.settle(pid)  # paid in full
         m = env.metrics()
+        assert m["reserved_payouts"] == "0" and m["net_assets"] == m["tvl"]
         minted = int(env.deposit(env.charlie, 10 * ATTO))
-        assert minted == 10 * ATTO * int(m["total_shares"]) // int(m["net_assets"])
-        assert minted > 10 * ATTO * int(m["total_shares"]) // int(m["tvl"])  # more shares than at gross NAV
+        assert minted == 10 * ATTO * int(m["total_shares"]) // int(m["tvl"])
+
+    def test_reviewer_poc_staging_a_breach_cannot_buy_discounted_shares(self, env):
+        """Stage a claim, try to buy cheap LP shares, let the claim be dismissed: no risk-free profit and no dilution."""
+        pid = self._two_lps_with_pending_claim(env)
+        before = {w: int(env.contract.get_underwriter(env.hex(w))["value"]) for w in (env.alice, env.owner)}
+        # the attacker's discounted-entry attempt is rejected outright
+        with env.vm.expect_revert("[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]"):
+            env.deposit(env.charlie, 50 * ATTO)
+        # the claim is dismissed (the endpoint recovered during the grace period)
+        env.advance(GRACE + 1)
+        env.rpc(500)
+        assert env.settle(pid)["paid"] is False
+        after = {w: int(env.contract.get_underwriter(env.hex(w))["value"]) for w in (env.alice, env.owner)}
+        assert env.metrics()["total_shares"] == str(100 * ATTO)  # no shares were ever minted to the attacker
+        for w in before:
+            assert after[w] >= before[w]  # existing LPs are never diluted: their value only rises
+        # deposits are open again, at the gross (== net) price
+        m = env.metrics()
+        assert env.deposit(env.charlie, 10 * ATTO) == str(10 * ATTO * int(m["total_shares"]) // int(m["tvl"]))
 
     def test_a_dismissed_claim_returns_the_reserved_value_to_everyone(self, env):
         pid = self._two_lps_with_pending_claim(env)
@@ -1168,3 +1202,49 @@ class TestClaimVelocity:
         assert min(ceilings) < 10 * ATTO  # the progress guarantee was actually exercised
         assert days <= 7  # well inside the 14-day settlement window
         env.assert_solvent()
+
+
+class TestStaleBlockPoisoning:
+    """A Byzantine leader must not be able to fabricate three consecutive STALE_BLOCK verdicts on a slow chain."""
+
+    def test_a_leader_ten_blocks_ahead_is_rejected_so_it_cannot_poison_last_block(self, funded):
+        env = funded
+        pid = env.create(env.bob, interval=5)
+        env.activate()
+        env.rpc(2_000)
+        env.probe(pid)  # honest probe stores last_block = 2000
+        assert env.policy(pid)["last_block"] == 2_000
+        # the next healthy probe: a leader claiming real+10 is refused by every validator that sees real
+        env.advance(61)
+        env.rpc(2_005)
+        assert env.probe(pid)["ok"]
+        assert not env.vm.run_validator(leader_result=honest(2_015))
+        assert env.vm.run_validator(leader_result=honest(2_005))
+        assert env.vm.run_validator(leader_result=honest(2_007))  # +2 is the slack for load-balanced nodes
+        assert not env.vm.run_validator(leader_result=honest(2_008))
+
+    def test_slow_progression_never_yields_consecutive_stale_verdicts(self, funded):
+        """Even at the most the validators will accept (+2 over the true height), a chain that advances
+        5 blocks per probe is never judged stale, so no breach can be staged."""
+        env = funded
+        pid = env.create(env.bob, interval=5)
+        env.activate()
+        real = 3_000
+        for _ in range(8):
+            real += 5
+            env.rpc(real)
+            r = env.next_probe(pid)
+            assert r["ok"], r
+            assert env.policy(pid)["last_block"] <= real
+        p = env.policy(pid)
+        assert p["status"] == "ACTIVE" and p["consecutive_failures"] == 0
+
+    def test_a_genuinely_frozen_node_is_still_detected(self, funded):
+        env = funded
+        pid = env.create(env.bob, interval=5)
+        env.activate()
+        env.rpc(5_000)
+        env.probe(pid)
+        for _ in range(3):
+            assert env.next_probe(pid)["reason"] == "STALE_BLOCK"  # height never moves
+        assert env.policy(pid)["status"] == "BREACH_PENDING"

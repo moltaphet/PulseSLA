@@ -21,7 +21,7 @@ export class ProtocolError extends Error {
   }
 }
 const E = {
-  velocity: "[VELOCITY_LIMIT]", expected: "[EXPECTED]", params: "[INVALID_PARAMS]", liquidity: "[INSUFFICIENT_LIQUIDITY]",
+  velocity: "[VELOCITY_LIMIT]", frozen: "[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]", expected: "[EXPECTED]", params: "[INVALID_PARAMS]", liquidity: "[INSUFFICIENT_LIQUIDITY]",
   cap: "[EXPOSURE_CAP]", state: "[INVALID_STATE]", soon: "[TOO_SOON]",
 } as const;
 
@@ -155,12 +155,14 @@ export class SimProtocol {
   // ------------------------------------------------------------ underwriting
   deposit(sender: string, amount: bigint): bigint {
     if (amount < LIMITS.minDeposit) throw new ProtocolError(E.params, "deposit below minimum");
+    // Frozen while any claim is reserved: pricing on net assets would let someone stage a breach, buy
+    // discounted shares and profit when the claim is dismissed. With nothing reserved, gross == net.
+    if (this.reservedPayouts > 0n) throw new ProtocolError(E.frozen, "a staged claim is reserved; deposits reopen when it settles");
     let minted: bigint;
     if (this.totalShares === 0n) minted = amount;
     else {
-      const net = this.netAssets();
-      if (net === 0n) throw new ProtocolError(E.state, "pool has no unreserved assets; deposits closed");
-      minted = (amount * this.totalShares) / net; // priced on assets net of pending claims
+      if (this.poolAssets === 0n) throw new ProtocolError(E.state, "pool has no assets; deposits closed");
+      minted = (amount * this.totalShares) / this.poolAssets; // gross assets
     }
     if (minted === 0n) throw new ProtocolError(E.params, "deposit too small for current share price");
     this.debit(sender, amount);
