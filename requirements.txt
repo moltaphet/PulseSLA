@@ -1,0 +1,9 @@
+# Python toolchain for the PulseSLA contract suite and scripts.
+# Python 3.12 is required (genlayer-test 0.30.0rc2 harness).
+#   uv venv --python 3.12 && uv pip install --prerelease=allow -r requirements.txt
+genlayer-test==0.30.0rc2
+genlayer-py==0.19.0rc2
+genvm-linter==0.11.1rc2
+pytest==9.1.1
+web3==8.0.0
+eth-account==0.14.0

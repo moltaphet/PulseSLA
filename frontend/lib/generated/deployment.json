@@ -1,0 +1,16 @@
+{
+  "network": "studio-next",
+  "rpc_url": "https://studio-next.genlayer.com/api",
+  "contract_address": "0x1848eeDa503717E58c0D7c411703593d8E54f8C3",
+  "source": "contracts/uptime_sla.py",
+  "source_sha256": "29f4d6c6d4eb8f02a0f600e168a591660cc1e03abd2a1732252e48ee74ed80ae",
+  "constructor_args": {
+    "activation_delay_secs": 60,
+    "claim_grace_secs": 300,
+    "probe_bond": "10000000000000000"
+  },
+  "deployed_at": 1791318713,
+  "deploy_tx": "0x5cf873ebe56b158217b9e4dac0e97a1492c7f31db055cda3e3204ae8dd614433",
+  "deployer": "0xc4DE3314A337aD0e3FbeE269f65cD7D6607DfE2B",
+  "explorer_url": "https://explorer-studio-next.genlayer.com/address/0x1848eeDa503717E58c0D7c411703593d8E54f8C3"
+}

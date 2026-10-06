@@ -1,0 +1,100 @@
+{
+  "contract": "0x1848eeDa503717E58c0D7c411703593d8E54f8C3",
+  "sender": "0xc4de3314a337ad0e3fbee269f65cd7d6607dfe2b",
+  "endpoint": "https://ethereum-rpc.publicnode.com",
+  "policy_id": 1,
+  "transactions": [
+    {
+      "fn": "deposit_underwriting",
+      "tx": "0x05e4d340c6eac4e91366d14b37b5a201b64e1b97a16e505a8f019bae513ff672",
+      "execution": "FINISHED_WITH_RETURN",
+      "consensus": "MAJORITY_AGREE",
+      "votes": {
+        "0x05d8aFc66B515038712537f99cAAEA73d16f0007": "agree",
+        "0x8D32eb5D0207f7E230C45e7BF0D14B2ED5DA3028": "agree",
+        "0xE4E106086F167D75E2270fa5f3680f6ac598d179": "idle",
+        "0xEEcEC5D1E07Ee40f5cb85aF922178Dc01278013C": "agree",
+        "0xcF5Fd792Df0Dc9d297af75c82B4A0011e8FA1A4A": "idle"
+      },
+      "seconds": 12.1
+    },
+    {
+      "fn": "create_policy",
+      "tx": "0x783bea3b0373c4f87b161b6542fa459f0e023a0edd44ca518dd0a47a2d499034",
+      "execution": "FINISHED_WITH_RETURN",
+      "consensus": "MAJORITY_AGREE",
+      "votes": {
+        "0x1dA3a7de8EA65A318bf88Eb63d3dC55295Dd257E": "agree",
+        "0x8142E5D1b04f84c3cD995C25AAe31B31F8e0379E": "agree",
+        "0x8D32eb5D0207f7E230C45e7BF0D14B2ED5DA3028": "idle",
+        "0xcEf1Baa172d0b4D99Dcc505B36332F26D1088025": "idle",
+        "0xcbC79F96B7A275b23EE64d80a98325107F6E1b77": "agree"
+      },
+      "seconds": 12.7
+    },
+    {
+      "fn": "trigger_probe",
+      "tx": "0x97531a392f09f8f3c8ecd64d3bc68d79335cd9f03ed6cc801b8dae11fdcbd80b",
+      "execution": "FINISHED_WITH_RETURN",
+      "consensus": "MAJORITY_AGREE",
+      "votes": {
+        "0x05d8aFc66B515038712537f99cAAEA73d16f0007": "agree",
+        "0x1dA3a7de8EA65A318bf88Eb63d3dC55295Dd257E": "agree",
+        "0x5A4230B920b18c4AFD3A28F99Eae669B7F2cdC1e": "idle",
+        "0xE52dDB85587585930b1E5f1Fe88fef21CcA49829": "agree",
+        "0xa0435f618c1F27B254998018AEa8Da5C77187852": "idle"
+      },
+      "seconds": 15.9
+    }
+  ],
+  "final_metrics": {
+    "activation_delay": 60,
+    "active_policies": 1,
+    "apy_bps": 4336,
+    "claim_grace": 300,
+    "free_liquidity": "960050000000000000",
+    "locked_coverage": "50000000000000000",
+    "probe_bond": "10000000000000000",
+    "reserved_payouts": "0",
+    "share_price": "1010050000000000000",
+    "solvent": true,
+    "total_bond_forfeits": "10000000000000000",
+    "total_breaches": 0,
+    "total_payouts": "0",
+    "total_policies": 1,
+    "total_premiums": "50000000000000",
+    "total_probes": 1,
+    "total_shares": "1000000000000000000",
+    "tvl": "1010050000000000000",
+    "utilization_bps": 495
+  },
+  "policy": {
+    "active_from": 1791318803,
+    "baseline_ok": true,
+    "claim_count": 0,
+    "consecutive_failures": 0,
+    "coverage": "50000000000000000",
+    "created_at": 1791318743,
+    "endpoint_url": "https://ethereum-rpc.publicnode.com",
+    "expires_at": 1791322403,
+    "holder": "0xc4de3314a337ad0e3fbee269f65cd7d6607dfe2b",
+    "host": "ethereum-rpc.publicnode.com",
+    "id": 1,
+    "last_block": 26135753,
+    "last_latency_ms": 0,
+    "last_ok": true,
+    "last_probe_at": 1791318824,
+    "last_reason": "OK",
+    "max_latency_ms": 3000,
+    "min_uptime_bps": 9900,
+    "payout": "0",
+    "premium": "50000000000000",
+    "probe_interval": 60,
+    "probe_mode": "rpc",
+    "samples_ok": 1,
+    "samples_total": 1,
+    "settle_at": 0,
+    "status": "ACTIVE",
+    "uptime_bps": 10000
+  }
+}

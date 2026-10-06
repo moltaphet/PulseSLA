@@ -1,0 +1,197 @@
+[
+  {
+    "name": "create_policy",
+    "inputs": [
+      {
+        "name": "endpoint_url",
+        "type": "string"
+      },
+      {
+        "name": "max_latency_ms",
+        "type": "int"
+      },
+      {
+        "name": "coverage_amount",
+        "type": "int"
+      },
+      {
+        "name": "duration_blocks",
+        "type": "int"
+      },
+      {
+        "name": "min_uptime_bps",
+        "type": "int"
+      },
+      {
+        "name": "probe_interval_blocks",
+        "type": "int"
+      },
+      {
+        "name": "probe_mode",
+        "type": "string"
+      }
+    ],
+    "readonly": false,
+    "payable": true,
+    "returns": "int"
+  },
+  {
+    "name": "deposit_underwriting",
+    "inputs": [],
+    "readonly": false,
+    "payable": true,
+    "returns": "string"
+  },
+  {
+    "name": "expire_policy",
+    "inputs": [
+      {
+        "name": "policy_id",
+        "type": "int"
+      }
+    ],
+    "readonly": false,
+    "payable": false,
+    "returns": "string"
+  },
+  {
+    "name": "get_incident_count",
+    "inputs": [],
+    "readonly": true,
+    "payable": false,
+    "returns": "int"
+  },
+  {
+    "name": "get_incidents",
+    "inputs": [
+      {
+        "name": "offset",
+        "type": "int"
+      },
+      {
+        "name": "limit",
+        "type": "int"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "array"
+  },
+  {
+    "name": "get_policy_count",
+    "inputs": [],
+    "readonly": true,
+    "payable": false,
+    "returns": "int"
+  },
+  {
+    "name": "get_policy_status",
+    "inputs": [
+      {
+        "name": "policy_id",
+        "type": "int"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "dict"
+  },
+  {
+    "name": "get_pool_metrics",
+    "inputs": [],
+    "readonly": true,
+    "payable": false,
+    "returns": "dict"
+  },
+  {
+    "name": "get_underwriter",
+    "inputs": [
+      {
+        "name": "underwriter_hex",
+        "type": "string"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "dict"
+  },
+  {
+    "name": "list_policies",
+    "inputs": [
+      {
+        "name": "offset",
+        "type": "int"
+      },
+      {
+        "name": "limit",
+        "type": "int"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "array"
+  },
+  {
+    "name": "quote_premium",
+    "inputs": [
+      {
+        "name": "coverage_amount",
+        "type": "int"
+      },
+      {
+        "name": "duration_blocks",
+        "type": "int"
+      },
+      {
+        "name": "min_uptime_bps",
+        "type": "int"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "string"
+  },
+  {
+    "name": "settle_claim",
+    "inputs": [
+      {
+        "name": "policy_id",
+        "type": "int"
+      }
+    ],
+    "readonly": false,
+    "payable": true,
+    "returns": "dict"
+  },
+  {
+    "name": "trigger_probe",
+    "inputs": [
+      {
+        "name": "policy_id",
+        "type": "int"
+      }
+    ],
+    "readonly": false,
+    "payable": true,
+    "returns": "dict"
+  },
+  {
+    "name": "whoami",
+    "inputs": [],
+    "readonly": true,
+    "payable": false,
+    "returns": "string"
+  },
+  {
+    "name": "withdraw_underwriting",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "int"
+      }
+    ],
+    "readonly": false,
+    "payable": false,
+    "returns": "string"
+  }
+]
