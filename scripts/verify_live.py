@@ -77,6 +77,9 @@ def main() -> None:
     m0 = L.read("get_pool_metrics")
     print("   ", {k: m0[k] for k in ("tvl", "activation_delay", "claim_grace", "probe_bond", "solvent")})
     check("solvent, empty or seeded pool", m0["solvent"] is True)
+    check("hardened build: net-asset pricing and claim-velocity fields present",
+          all(k in m0 for k in ("net_assets", "epoch_ceiling", "epoch_paid")) and m0["max_epoch_payout_bps"] == 3000,
+          f"max_epoch_payout_bps={m0.get('max_epoch_payout_bps')}")
     delay, bond = int(m0["activation_delay"]), int(m0["probe_bond"])
 
     step("a. Deposit underwriting liquidity")
@@ -97,6 +100,7 @@ def main() -> None:
     pid = int(L.read("get_policy_count"))
     p = L.read("get_policy_status", pid)
     check("policy is ACTIVE with the quoted premium", p["status"] == "ACTIVE" and int(p["premium"]) == premium, f"policy #{pid}, premium {premium / GEN} GEN")
+    check("exposure is keyed by registrable domain", p.get("apex") == "publicnode.com", f"apex={p.get('apex')}")
     check("coverage locked in the pool", int(L.read("get_pool_metrics")["locked_coverage"]) >= cov)
 
     step(f"c. Wait for activation ({delay}s), then probe {a.endpoint} through GenVM consensus")
@@ -130,6 +134,7 @@ def main() -> None:
     m = L.read("get_pool_metrics")
     check("pool solvent (locked <= assets)", m["solvent"] is True and int(m["locked_coverage"]) <= int(m["tvl"]),
           f"tvl {int(m['tvl']) / GEN} GEN, locked {int(m['locked_coverage']) / GEN} GEN, util {m['utilization_bps'] / 100:.2f}%")
+    check("net assets equal gross assets with nothing reserved", m["net_assets"] == m["tvl"] and m["reserved_payouts"] == "0")
     check("probe counter advanced", int(m["total_probes"]) >= 1)
     check("policy status query is consistent", L.read("get_policy_status", pid)["id"] == pid and int(L.read("get_policy_count")) >= 1)
     lst = L.read("list_policies", 0, 10)

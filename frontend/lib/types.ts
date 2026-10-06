@@ -20,6 +20,8 @@ export type IncidentKind =
 
 export interface PoolMetrics {
   tvl: bigint;
+  /** Pool assets minus capital reserved for staged claims: the basis for share pricing and redemptions. */
+  netAssets: bigint;
   totalShares: bigint;
   sharePrice: bigint;
   lockedCoverage: bigint;
@@ -38,6 +40,10 @@ export interface PoolMetrics {
   claimGrace: number;
   probeBond: bigint;
   solvent: boolean;
+  /** Claim-velocity window: payouts so far this epoch, and the epoch ceiling. */
+  epochPaid: bigint;
+  epochCeiling: bigint;
+  maxEpochPayoutBps: number;
 }
 
 export interface UnderwriterPosition {
@@ -51,6 +57,8 @@ export interface Policy {
   holder: string;
   endpointUrl: string;
   host: string;
+  /** Registrable domain (eTLD+1): the unit of the per-host exposure cap. */
+  apex: string;
   probeMode: ProbeMode;
   maxLatencyMs: number;
   minUptimeBps: number;

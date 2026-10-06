@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import parity from "@/lib/__fixtures__/premium-parity.json";
 import {
-  coverageLimits, exposureFor, hostnameOf, quotePremium, rateBpsFor, validateEndpointUrl, vestedPayout,
+  apexOf, coverageLimits, exposureFor, hostnameOf, quotePremium, rateBpsFor, validateEndpointUrl, vestedPayout,
 } from "@/lib/pricing";
 import type { Policy } from "@/lib/types";
 import { ATTO } from "@/lib/units";
@@ -86,7 +86,7 @@ describe("coverageLimits", () => {
 
 describe("exposureFor", () => {
   const mk = (over: Partial<Policy>): Policy => ({
-    id: 1, holder: "0xa", endpointUrl: "", host: "h.io", probeMode: "rpc", maxLatencyMs: 500, minUptimeBps: 9990, probeInterval: 60,
+    id: 1, holder: "0xa", endpointUrl: "", host: "h.io", apex: "h.io", probeMode: "rpc", maxLatencyMs: 500, minUptimeBps: 9990, probeInterval: 60,
     coverage: ATTO, premium: 0n, createdAt: 0, activeFrom: 0, expiresAt: 0, status: "ACTIVE", samplesTotal: 0, samplesOk: 0,
     uptimeBps: 10000, consecutiveFailures: 0, baselineOk: false, lastProbeAt: 0, lastBlock: 0, lastLatencyMs: 0, lastReason: "",
     lastOk: false, settleAt: 0, claimCount: 0, payout: 0n, ...over,
@@ -95,5 +95,20 @@ describe("exposureFor", () => {
     const ps = [mk({}), mk({ id: 2, status: "BREACH_PENDING" }), mk({ id: 3, status: "PAID" }), mk({ id: 4, host: "other.io", holder: "0xB" })];
     expect(exposureFor(ps, "h.io", "0xA")).toEqual({ host: 2n * ATTO, holder: 2n * ATTO });
     expect(exposureFor(ps, "other.io", "0xb")).toEqual({ host: ATTO, holder: ATTO });
+  });
+});
+
+describe("apexOf: parity with the contract's registrable-domain grouping", () => {
+  it.each([
+    ["rpc.node.io", "node.io"], ["a.b.c.node.io", "node.io"], ["node.io", "node.io"],
+    ["rpc.example.co.uk", "example.co.uk"], ["example.co.uk", "example.co.uk"], ["a.b.example.com.au", "example.com.au"],
+    ["my-node.vercel.app", "my-node.vercel.app"], ["x.my-node.vercel.app", "my-node.vercel.app"],
+    ["tenant.github.io", "tenant.github.io"], ["8.8.8.8", "8.8.8.8"],
+  ])("%s -> %s", (host, apex) => expect(apexOf(host)).toBe(apex));
+
+  it("exposureFor groups subdomains", () => {
+    const live = { host: "rpc1.node.io", holder: "0xa", coverage: 3n * ATTO, status: "ACTIVE" } as Policy;
+    expect(exposureFor([live], "rpc2.node.io", "0xz").host).toBe(3n * ATTO);
+    expect(exposureFor([live], "rpc.other.io", "0xz").host).toBe(0n);
   });
 });

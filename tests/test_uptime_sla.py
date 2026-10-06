@@ -248,19 +248,19 @@ class TestCreatePolicy:
     def test_per_holder_cap(self, funded):
         env = funded
         a = env.distinct_holders(1)[0]
-        env.create(a, url="https://one.node.io", coverage=10 * ATTO)
-        env.create(a, url="https://two.node.io", coverage=10 * ATTO)
+        env.create(a, url="https://rpc.one-node.io", coverage=10 * ATTO)
+        env.create(a, url="https://rpc.two-node.io", coverage=10 * ATTO)
         with env.vm.expect_revert("[EXPOSURE_CAP]"):
-            env.create(a, url="https://three.node.io", coverage=ATTO)
+            env.create(a, url="https://rpc.three-node.io", coverage=ATTO)
 
     def test_utilization_cap(self, funded):
         env = funded
         holders = env.distinct_holders(5)
         for i in range(8):
-            env.create(holders[i // 2], url=f"https://host{i // 2}.node.io", coverage=10 * ATTO)
+            env.create(holders[i // 2], url=f"https://rpc.apex{i // 2}.io", coverage=10 * ATTO)
         assert int(env.metrics()["utilization_bps"]) <= 8000
         with env.vm.expect_revert("[EXPOSURE_CAP]"):
-            env.create(holders[4], url="https://host9.node.io", coverage=5 * ATTO)
+            env.create(holders[4], url="https://rpc.apex9.io", coverage=5 * ATTO)
         env.assert_solvent()
 
 
@@ -572,8 +572,8 @@ class TestClaims:
 
     def test_gold_breaches_where_bronze_tolerates_the_same_outage(self, funded):
         env = funded
-        gold = env.create(env.bob, uptime=9990, url="https://gold.node.io")
-        bronze = env.create(env.alice, uptime=9000, url="https://bronze.node.io")
+        gold = env.create(env.bob, uptime=9990, url="https://rpc.gold-node.io")
+        bronze = env.create(env.alice, uptime=9000, url="https://rpc.bronze-node.io")
         env.activate()
         env.rpc(100)
         block = 100
@@ -699,7 +699,7 @@ class TestClaims:
         env.stage_breach(pid)
         with env.vm.expect_revert("[INVALID_STATE]"):
             env.contract.expire_policy(pid)  # still inside the window
-        env.advance(GRACE + 7 * 86400 + 1)
+        env.advance(GRACE + 14 * 86400 + 1)
         with env.vm.expect_revert("[INVALID_STATE]"):
             env.settle(pid)
         assert env.contract.expire_policy(pid) == "LAPSED"
@@ -765,10 +765,10 @@ class TestCollusion:
     def test_one_operator_cannot_concentrate_the_pool(self, funded):
         env = funded
         a = env.distinct_holders(1)[0]
-        env.create(a, url="https://n1.node.io", coverage=10 * ATTO)
-        env.create(a, url="https://n2.node.io", coverage=10 * ATTO)
+        env.create(a, url="https://rpc.n1-node.io", coverage=10 * ATTO)
+        env.create(a, url="https://rpc.n2-node.io", coverage=10 * ATTO)
         with env.vm.expect_revert("[EXPOSURE_CAP]"):
-            env.create(a, url="https://n3.node.io", coverage=10 * ATTO)
+            env.create(a, url="https://rpc.n3-node.io", coverage=10 * ATTO)
 
     def test_single_policy_loss_is_bounded_by_pool_share(self, funded):
         env = funded
@@ -797,7 +797,7 @@ class TestInvariants:
         holders = env.distinct_holders(4)
         pids = []
         for i in range(8):  # 8 x 10 GEN = the 80% utilization ceiling
-            pids.append(env.create(holders[i // 2], url=f"https://host{i // 2}.node.io", coverage=10 * ATTO))
+            pids.append(env.create(holders[i // 2], url=f"https://rpc.apex{i // 2}.io", coverage=10 * ATTO))
         env.assert_solvent()
         locked = int(env.metrics()["locked_coverage"])
         assert locked == 80 * ATTO
@@ -819,10 +819,19 @@ class TestInvariants:
 
         env.advance(GRACE + 1)
         paid = 0
+        epochs = 0
         for pid in pids:
-            paid += int(env.settle(pid)["payout"])
+            while True:
+                try:
+                    paid += int(env.settle(pid)["payout"])
+                    break
+                except Exception as exc:  # claim velocity ceiling: the claim waits for the next epoch
+                    assert "[VELOCITY_LIMIT]" in str(exc)
+                    env.advance(86_400 + 1)
+                    epochs += 1
             env.assert_solvent()
             assert int(env.metrics()["tvl"]) >= 0
+        assert (epochs >= 2) if age_days else (epochs == 0)  # 8 x 10 GEN against a shrinking 30% ceiling needs several epochs
         m = env.metrics()
         assert m["locked_coverage"] == "0" and m["reserved_payouts"] == "0" and m["active_policies"] == 0
         assert m["total_payouts"] == str(paid)
@@ -881,3 +890,281 @@ class TestInvariants:
                   "reserved_payouts", "share_price", "active_policies", "solvent"):
             assert k in m
         assert m["solvent"] is True and m["utilization_bps"] == 0
+
+
+# ============================================================================
+# Hardening: Byzantine leader, LP early-exit, apex-domain caps, claim velocity
+# ============================================================================
+def honest(block: int) -> dict:
+    return {"ok": True, "reason": "OK", "status": 200, "latency_ms": 20, "block": block}
+
+
+class TestByzantineLeader:
+    @pytest.fixture
+    def probed(self, funded):
+        env = funded
+        pid = env.create(env.bob)
+        env.activate()
+        env.rpc(1_000)
+        assert env.probe(pid)["block"] == 1_000
+        return env, pid
+
+    @pytest.mark.parametrize("block,expected", [(1_000, True), (1_010, True), (990, True), (1_011, False), (989, False)])
+    def test_block_drift_is_bounded_to_ten(self, probed, block, expected):
+        env, _ = probed
+        assert env.vm.run_validator(leader_result=honest(block)) is expected
+
+    @pytest.mark.parametrize("block", [-5, -2, 0, 10**18, 2**53 + 1, 10**30])
+    def test_negative_zero_and_absurd_heights_are_rejected(self, probed, block):
+        env, _ = probed
+        assert not env.vm.run_validator(leader_result=honest(block))
+
+    @pytest.mark.parametrize("block", ["1000", 1000.0, True, None])
+    def test_non_integer_heights_are_rejected(self, probed, block):
+        env, _ = probed
+        assert not env.vm.run_validator(leader_result=honest(block))
+
+    def test_poisoned_high_block_is_rejected_even_when_the_verdict_matches(self, probed):
+        """A leader reporting height 10**9 on a healthy endpoint agrees on 'ok' but must not be accepted."""
+        env, _ = probed
+        assert not env.vm.run_validator(leader_result=honest(10**9))
+
+    def test_poisoned_low_block_cannot_manufacture_a_stale_verdict_later(self, probed):
+        env, _ = probed
+        assert not env.vm.run_validator(leader_result=honest(5))
+
+    def test_validator_measures_its_own_height(self, probed):
+        env, _ = probed
+        env.rpc(1_005)  # the validator's vantage point is a few blocks ahead: still honest
+        assert env.vm.run_validator(leader_result=honest(1_000))
+        env.rpc(1_100)  # but not 100 blocks ahead
+        assert not env.vm.run_validator(leader_result=honest(1_000))
+
+    def test_ok_in_rpc_mode_requires_a_height(self, probed):
+        env, _ = probed
+        assert not env.vm.run_validator(leader_result=honest(-1))
+
+    def test_failing_leader_cannot_smuggle_an_uncorroborated_height(self, probed):
+        """HIGH_LATENCY results store `last_block`; if the validator sees no height at all, refuse."""
+        env, _ = probed
+        env.rpc(status=502)
+        forged = {"ok": False, "reason": "HIGH_LATENCY", "status": 200, "latency_ms": 9_000, "block": 5_000_000}
+        assert not env.vm.run_validator(leader_result=forged)
+
+    def test_failing_leader_without_a_height_is_still_accepted(self, probed):
+        env, _ = probed
+        env.rpc(status=502)
+        failing = {"ok": False, "reason": "HTTP_ERROR", "status": 502, "latency_ms": 10, "block": -1}
+        assert env.vm.run_validator(leader_result=failing)
+
+    def test_http_mode_has_no_height_requirement(self, funded):
+        env = funded
+        pid = env.create(env.bob, mode="http")
+        env.activate()
+        env.http(200)
+        env.probe(pid)
+        assert env.vm.run_validator(leader_result={"ok": True, "reason": "OK", "status": 200, "latency_ms": 5, "block": -1})
+
+
+class TestUnderwriterEarlyExit:
+    def _two_lps_with_pending_claim(self, env):
+        env.deposit(env.alice, 50 * ATTO)
+        env.deposit(env.owner, 50 * ATTO)
+        pid = env.create(env.bob, coverage=10 * ATTO, blocks=100_000)
+        env.activate()
+        env.advance(8 * 86_400)  # fully vested: the claim will pay 100% of coverage
+        env.rpc(100)
+        env.probe(pid)
+        env.rpc(status=502)
+        for _ in range(3):
+            env.next_probe(pid)
+        assert env.policy(pid)["status"] == "BREACH_PENDING"
+        return pid
+
+    def test_redemptions_are_priced_net_of_reserved_payouts(self, env):
+        pid = self._two_lps_with_pending_claim(env)
+        m = env.metrics()
+        assert int(m["net_assets"]) == int(m["tvl"]) - 10 * ATTO == int(m["tvl"]) - int(m["reserved_payouts"])
+        assert int(m["share_price"]) < ATTO * int(m["tvl"]) // int(m["total_shares"])
+        pos = env.contract.get_underwriter(env.hex(env.alice))
+        assert int(pos["value"]) == int(pos["shares"]) * int(m["net_assets"]) // int(m["total_shares"])
+        assert pid == 1
+
+    def test_early_exit_cannot_dump_the_pending_loss_on_remaining_lps(self, env):
+        pid = self._two_lps_with_pending_claim(env)
+        alice_before = env.metrics()
+        env.transfers.clear()
+        value = int(env.contract.get_underwriter(env.hex(env.alice))["value"])
+        env.withdraw(env.alice, value)  # Alice front-runs the settlement
+        exit_amount = env.paid_to(env.alice)
+        # Without net pricing Alice would walk away with ~half of gross TVL (~50 GEN).
+        assert exit_amount < int(alice_before["tvl"]) // 2 - 4 * ATTO
+        env.advance(GRACE + 1)
+        assert env.settle(pid)["payout"] == str(10 * ATTO)
+        owner_value = int(env.contract.get_underwriter(env.hex(env.owner))["value"])
+        # Both LPs bore the loss equally: the stayer holds what the leaver was paid.
+        assert abs(owner_value - exit_amount) <= 10**9, (owner_value, exit_amount)
+        env.assert_solvent()
+
+    def test_staying_lps_do_not_lose_more_than_their_share(self, env):
+        """Counterfactual: if neither LP exits, each ends with the same value as the early exiter was paid."""
+        pid = self._two_lps_with_pending_claim(env)
+        before = int(env.contract.get_underwriter(env.hex(env.alice))["value"])
+        env.advance(GRACE + 1)
+        env.settle(pid)
+        after = int(env.contract.get_underwriter(env.hex(env.alice))["value"])
+        assert abs(after - before) <= 10**9
+
+    def test_withdrawal_cannot_infringe_reserved_capital(self, env):
+        self._two_lps_with_pending_claim(env)
+        tvl = int(env.metrics()["tvl"])
+        with env.vm.expect_revert("[INSUFFICIENT_LIQUIDITY]"):
+            env.withdraw(env.owner, tvl - 9 * ATTO)  # more than the net position value
+        free = int(env.metrics()["free_liquidity"])
+        assert free == tvl - 10 * ATTO
+
+    def test_deposits_during_a_pending_claim_are_priced_at_net_assets(self, env):
+        self._two_lps_with_pending_claim(env)
+        m = env.metrics()
+        minted = int(env.deposit(env.charlie, 10 * ATTO))
+        assert minted == 10 * ATTO * int(m["total_shares"]) // int(m["net_assets"])
+        assert minted > 10 * ATTO * int(m["total_shares"]) // int(m["tvl"])  # more shares than at gross NAV
+
+    def test_a_dismissed_claim_returns_the_reserved_value_to_everyone(self, env):
+        pid = self._two_lps_with_pending_claim(env)
+        gross = int(env.metrics()["tvl"])
+        env.advance(GRACE + 1)
+        env.rpc(500)
+        assert env.settle(pid)["paid"] is False
+        m = env.metrics()
+        assert int(m["net_assets"]) == int(m["tvl"]) and int(m["tvl"]) > gross
+
+
+class TestApexDomainCaps:
+    def test_subdomain_cycling_cannot_bypass_the_host_cap(self, funded):
+        env = funded
+        a, b, c = env.distinct_holders(3)
+        env.create(a, url="https://rpc1.node.io", coverage=10 * ATTO)
+        env.create(b, url="https://rpc2.node.io", coverage=10 * ATTO)  # apex node.io now at 20%
+        with env.vm.expect_revert("[EXPOSURE_CAP]"):
+            env.create(c, url="https://rpc3.node.io", coverage=ATTO)
+        with env.vm.expect_revert("[EXPOSURE_CAP]"):
+            env.create(c, url="https://a.b.c.node.io", coverage=ATTO)
+        env.create(c, url="https://rpc.other-node.io", coverage=ATTO)  # a different registrable domain is fine
+
+    @pytest.mark.parametrize(
+        "host,apex",
+        [
+            ("rpc.node.io", "node.io"), ("a.b.c.node.io", "node.io"), ("node.io", "node.io"),
+            ("rpc.example.co.uk", "example.co.uk"), ("example.co.uk", "example.co.uk"), ("a.b.example.com.au", "example.com.au"),
+            ("my-node.vercel.app", "my-node.vercel.app"), ("x.my-node.vercel.app", "my-node.vercel.app"),
+            ("tenant.github.io", "tenant.github.io"), ("8.8.8.8", "8.8.8.8"),
+        ],
+    )
+    def test_apex_extraction(self, funded, host, apex):
+        env = funded
+        pid = env.create(env.bob, url=f"https://{host}", coverage=ATTO)
+        assert env.policy(pid)["apex"] == apex
+
+    def test_platform_tenants_do_not_share_a_cap(self, funded):
+        env = funded
+        a, b, c = env.distinct_holders(3)
+        env.create(a, url="https://one.vercel.app", coverage=10 * ATTO)
+        env.create(b, url="https://two.vercel.app", coverage=10 * ATTO)
+        env.create(c, url="https://three.vercel.app", coverage=10 * ATTO)  # separate tenants, separate apex
+
+    def test_apex_exposure_is_released_on_close(self, funded):
+        env = funded
+        a, b = env.distinct_holders(2)
+        pid = env.create(a, url="https://rpc1.node.io", coverage=10 * ATTO, blocks=300)
+        env.create(b, url="https://rpc2.node.io", coverage=10 * ATTO)
+        env.advance(ACTIVATION + 300 * 12)
+        env.contract.expire_policy(pid)
+        env.create(a, url="https://rpc3.node.io", coverage=10 * ATTO)  # room again
+
+
+class TestClaimVelocity:
+    def _breach_all(self, env, n):
+        holders = env.distinct_holders(4)
+        pids = [env.create(holders[i // 2], url=f"https://rpc.apex{i // 2}.io", coverage=10 * ATTO) for i in range(n)]
+        env.activate()
+        env.advance(8 * 86_400)
+        env.rpc(100)
+        for pid in pids:
+            env.probe(pid)
+        env.rpc(status=502)
+        for _ in range(3):
+            env.advance(61)
+            for pid in pids:
+                env.probe(pid)
+        env.advance(GRACE + 1)
+        return pids
+
+    def test_payouts_beyond_the_epoch_ceiling_wait_for_the_next_epoch(self, funded):
+        env = funded
+        pids = self._breach_all(env, 6)
+        ceiling = int(env.metrics()["epoch_ceiling"])
+        assert ceiling == int(env.metrics()["tvl"]) * 3000 // 10_000
+        for pid in pids[:3]:
+            assert env.settle(pid)["paid"]
+        assert int(env.metrics()["epoch_paid"]) == 30 * ATTO
+        before = env.metrics()
+        with env.vm.expect_revert("[VELOCITY_LIMIT]"):
+            env.settle(pids[3])
+        # a rejected settlement changes nothing: the claim is still staged and reserved
+        after = env.metrics()
+        assert env.policy(pids[3])["status"] == "BREACH_PENDING"
+        assert (after["tvl"], after["reserved_payouts"], after["total_probes"]) == (before["tvl"], before["reserved_payouts"], before["total_probes"])
+        env.advance(86_400 + 1)
+        assert int(env.metrics()["epoch_paid"]) == 0  # the new epoch starts clean
+        # the ceiling is 30% of the (now smaller) pool: two more claims fit, the sixth waits again
+        assert env.settle(pids[3])["paid"] and env.settle(pids[4])["paid"]
+        with env.vm.expect_revert("[VELOCITY_LIMIT]"):
+            env.settle(pids[5])
+        env.advance(86_400 + 1)
+        assert env.settle(pids[5])["paid"]
+        env.assert_solvent()
+
+    def test_a_single_step_can_never_pay_more_than_the_ceiling(self, funded):
+        env = funded
+        pids = self._breach_all(env, 8)
+        tvl_before = int(env.metrics()["tvl"])
+        paid = 0
+        for pid in pids:
+            try:
+                paid += int(env.settle(pid)["payout"])
+            except Exception as exc:
+                assert "[VELOCITY_LIMIT]" in str(exc)
+        assert paid == 30 * ATTO
+        assert paid <= tvl_before * 3000 // 10_000
+        assert int(env.metrics()["tvl"]) == tvl_before - paid
+
+    def test_dismissals_are_not_rate_limited(self, funded):
+        env = funded
+        pids = self._breach_all(env, 8)
+        env.rpc(500)  # everything recovered during the grace period
+        for pid in pids:
+            assert env.settle(pid)["paid"] is False
+        assert env.metrics()["epoch_paid"] == "0"
+
+    def test_every_claim_is_eventually_paid_inside_the_settlement_window(self, funded):
+        """The ceiling shrinks with the pool, so it can fall below a single claim; the
+        first payout of each epoch is always allowed so the queue still drains."""
+        env = funded
+        pids = self._breach_all(env, 8)
+        ceilings, days = [], 0
+        while any(env.policy(pid)["status"] == "BREACH_PENDING" for pid in pids):
+            ceilings.append(int(env.metrics()["epoch_ceiling"]))
+            for pid in pids:
+                if env.policy(pid)["status"] == "BREACH_PENDING":
+                    try:
+                        env.settle(pid)
+                    except Exception as exc:
+                        assert "[VELOCITY_LIMIT]" in str(exc)
+            env.advance(86_400 + 1)
+            days += 1
+            assert days <= 10, "queue failed to drain"
+        assert all(env.policy(pid)["status"] == "PAID" for pid in pids)
+        assert min(ceilings) < 10 * ATTO  # the progress guarantee was actually exercised
+        assert days <= 7  # well inside the 14-day settlement window
+        env.assert_solvent()

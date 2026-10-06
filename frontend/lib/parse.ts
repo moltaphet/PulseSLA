@@ -39,6 +39,8 @@ export function parsePoolMetrics(raw: unknown): PoolMetrics {
   const r = toRecord(raw);
   return {
     tvl: big(r.tvl),
+    // Older deployments predate net-asset pricing: derive it.
+    netAssets: r.net_assets !== undefined ? big(r.net_assets) : big(r.tvl) - big(r.reserved_payouts),
     totalShares: big(r.total_shares),
     sharePrice: big(r.share_price),
     lockedCoverage: big(r.locked_coverage),
@@ -57,6 +59,9 @@ export function parsePoolMetrics(raw: unknown): PoolMetrics {
     claimGrace: num(r.claim_grace),
     probeBond: big(r.probe_bond),
     solvent: r.solvent === true,
+    epochPaid: big(r.epoch_paid),
+    epochCeiling: big(r.epoch_ceiling),
+    maxEpochPayoutBps: num(r.max_epoch_payout_bps),
   };
 }
 
@@ -75,6 +80,7 @@ export function parsePolicy(raw: unknown): Policy {
     holder: str(r.holder).toLowerCase(),
     endpointUrl: str(r.endpoint_url),
     host: str(r.host),
+    apex: str(r.apex) || str(r.host),
     probeMode: (str(r.probe_mode) === "http" ? "http" : "rpc") as ProbeMode,
     maxLatencyMs: num(r.max_latency_ms),
     minUptimeBps: num(r.min_uptime_bps),

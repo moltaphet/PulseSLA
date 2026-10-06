@@ -105,11 +105,35 @@ MAX_INTERVAL_BLOCKS = 7200  # ~1 day
 # --- Staged claim parameters -------------------------------------------------
 BREACH_CONSECUTIVE = 3  # consecutive failing probes needed to stage a claim
 MEASUREMENT_WINDOW = 30 * 24 * 3600  # uptime sample window (30 days)
-SETTLE_WINDOW = 7 * 24 * 3600  # after settle_at, a claim lapses
+SETTLE_WINDOW = 14 * 24 * 3600  # after settle_at, a claim lapses (outlasts the velocity queue)
 PAYOUT_FLOOR_BPS = 2500  # a brand-new policy vests 25% of coverage ...
 PAYOUT_RAMP_SECS = 7 * 24 * 3600  # ... rising linearly to 100% over 7 days
 MIN_STALE_ELAPSED = 60  # block must advance if >= this many seconds passed
 LATENCY_TOLERANCE_BPS = 2000  # validators accept latency verdicts +-20% of limit
+
+# Rogue-leader bounds (see _verdicts_agree): independent observations of one
+# chain can differ by a few blocks, never by more than this.
+MAX_BLOCK_DRIFT = 10
+MAX_BLOCK_HEIGHT = 2**53  # beyond any real chain; rejects absurd leader values
+
+# Claim velocity: payouts per epoch are capped at a share of pool assets, so a
+# wave of simultaneous breaches is paid out over several epochs, not in one step.
+EPOCH_SECONDS = 24 * 3600
+MAX_EPOCH_PAYOUT_BPS = 3000  # 30% of pool assets per epoch
+ERR_VELOCITY = "[VELOCITY_LIMIT]"
+
+# Multi-label public suffixes, so that exposure is grouped by registrable domain
+# (eTLD+1) rather than by subdomain. A full Public Suffix List cannot be embedded
+# in a contract; this covers common country-code and hosting-platform suffixes.
+# Anything else falls back to the last two labels.
+_MULTI_LABEL_SUFFIXES = (
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "or.jp",
+    "co.kr", "co.in", "net.in", "com.br", "com.cn", "com.hk", "com.sg", "com.tw", "com.tr", "com.mx",
+    "com.ar", "co.za", "co.il", "com.ua", "com.pl",
+    "vercel.app", "netlify.app", "github.io", "gitlab.io", "pages.dev", "workers.dev", "web.app",
+    "firebaseapp.com", "herokuapp.com", "onrender.com", "fly.dev", "railway.app", "azurewebsites.net",
+    "cloudfront.net", "amazonaws.com", "elasticbeanstalk.com", "appspot.com", "ngrok.io", "ngrok-free.app",
+)
 
 _BLOCKED_SUFFIXES = (
     ".local",
@@ -177,6 +201,19 @@ def _is_safe_endpoint(url: str) -> bool:
         if host.endswith(suffix):
             return False
     return True
+
+
+def _apex(host: str) -> str:
+    """Registrable domain (eTLD+1) of a hostname, used to group exposure so that
+    cycling subdomains (a.node.io, b.node.io, ...) cannot bypass the per-host cap.
+    IP literals are returned unchanged."""
+    labels = host.split(".")
+    if len(labels) <= 2 or all(p.isdigit() for p in labels):
+        return host
+    last_two = ".".join(labels[-2:])
+    if last_two in _MULTI_LABEL_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return last_two
 
 
 def _tier_rate_bps(min_uptime_bps: int) -> int:
@@ -286,11 +323,17 @@ def _measure(url: str, mode: str, max_latency_ms: int, last_block: int, elapsed:
     }
 
 
-def _verdicts_agree(leaders_res, leader_fn, max_latency_ms: int) -> bool:
-    """Validator rule. The healthy/failing verdict must match; the failure
-    CLASS (502 vs timeout vs stale) need not, since any failure counts the same.
-    A verdict split that is purely a latency call within +-20% of the limit is
-    tolerated, because latency jitter between vantage points is not a lie."""
+def _verdicts_agree(leaders_res, leader_fn, max_latency_ms: int, rpc_mode: bool) -> bool:
+    """Validator rule.
+
+    1. The healthy/failing verdict must match (the failure CLASS need not).
+    2. The leader's block height is bounded against this validator's OWN
+       observation: |leader - validator| <= MAX_BLOCK_DRIFT. A Byzantine leader
+       therefore cannot poison the stored `last_block` (and so induce, or hide,
+       STALE_BLOCK verdicts) beyond that drift. Negative, zero-on-success or
+       absurd heights are rejected outright.
+    3. A verdict split that is purely a latency call within +-20% of the limit is
+       tolerated, because latency jitter between vantage points is not a lie."""
     if not isinstance(leaders_res, gl.vm.Return):
         return False
     lead = leaders_res.calldata
@@ -299,9 +342,27 @@ def _verdicts_agree(leaders_res, leader_fn, max_latency_ms: int) -> bool:
     for key in ("ok", "reason", "status", "latency_ms", "block"):
         if key not in lead:
             return False
+    if not isinstance(lead["ok"], bool):
+        return False
+    lead_block = lead["block"]
+    if not isinstance(lead_block, int) or isinstance(lead_block, bool):
+        return False
+    if lead_block < -1 or lead_block == 0 or lead_block > MAX_BLOCK_HEIGHT:
+        return False
     if lead["ok"] and lead["status"] != 200:
         return False
+    if lead["ok"] and rpc_mode and lead_block < 0:
+        return False
     mine = leader_fn()
+    my_block = mine["block"]
+    if lead_block > 0:
+        if my_block > 0:
+            if abs(lead_block - my_block) > MAX_BLOCK_DRIFT:
+                return False
+        elif lead["reason"] in (R_OK, R_HIGH_LATENCY):
+            # The leader's height would be stored but this validator cannot
+            # corroborate any height: refuse rather than accept it unchecked.
+            return False
     if bool(lead["ok"]) == bool(mine["ok"]):
         return True
     if lead["reason"] in (R_OK, R_HIGH_LATENCY) and mine["reason"] in (R_OK, R_HIGH_LATENCY):
@@ -332,6 +393,7 @@ class Policy:
     holder: Address
     endpoint_url: str
     host: str
+    apex: str  # registrable domain (eTLD+1): the unit of the per-host exposure cap
     probe_mode: str
     max_latency_ms: u256
     min_uptime_bps: u256
@@ -381,6 +443,10 @@ class PulseSLA(gl.contract.Contract):
     total_bond_forfeits: u256
     total_probes: u256
     total_breaches: u256
+    # Claim-velocity accounting (current epoch).
+    velocity_epoch: u256
+    velocity_paid: u256
+    velocity_base: u256  # pool assets when the epoch's first payout was made
     # Immutable protocol parameters (set at deploy).
     activation_delay: u256
     claim_grace: u256
@@ -401,6 +467,9 @@ class PulseSLA(gl.contract.Contract):
         self.total_bond_forfeits = 0
         self.total_probes = 0
         self.total_breaches = 0
+        self.velocity_epoch = 0
+        self.velocity_paid = 0
+        self.velocity_base = 0
         self.activation_delay = activation_delay_secs
         self.claim_grace = claim_grace_secs
         self.probe_bond = probe_bond
@@ -412,10 +481,16 @@ class PulseSLA(gl.contract.Contract):
         locked = int(self.locked_coverage)
         shares = int(self.total_shares)
         free = assets - locked if assets > locked else 0
+        net = self._net_assets()
+        epoch_paid, epoch_ceiling = self._velocity_window(self._now(), assets)
         return {
             "tvl": str(assets),
+            "net_assets": str(net),
             "total_shares": str(shares),
-            "share_price": str(assets * ATTO // shares) if shares > 0 else str(ATTO),
+            "share_price": str(net * ATTO // shares) if shares > 0 else str(ATTO),
+            "epoch_paid": str(epoch_paid),
+            "epoch_ceiling": str(epoch_ceiling),
+            "max_epoch_payout_bps": MAX_EPOCH_PAYOUT_BPS,
             "locked_coverage": str(locked),
             "reserved_payouts": str(int(self.reserved_payouts)),
             "free_liquidity": str(free),
@@ -440,7 +515,7 @@ class PulseSLA(gl.contract.Contract):
         s = int(self.shares[underwriter_hex]) if underwriter_hex in self.shares else 0
         assets = int(self.pool_assets)
         shares = int(self.total_shares)
-        value = s * assets // shares if shares > 0 else 0
+        value = s * self._net_assets() // shares if shares > 0 else 0
         locked = int(self.locked_coverage)
         free = assets - locked if assets > locked else 0
         return {
@@ -498,13 +573,14 @@ class PulseSLA(gl.contract.Contract):
         if amount < MIN_DEPOSIT:
             raise gl.vm.UserError(f"{ERR_PARAMS} deposit below minimum")
         assets = int(self.pool_assets)
+        net = self._net_assets()
         total = int(self.total_shares)
         if total == 0:
             minted = amount
         else:
-            if assets == 0:
-                raise gl.vm.UserError(f"{ERR_STATE} pool has no assets; deposits closed")
-            minted = amount * total // assets
+            if net == 0:
+                raise gl.vm.UserError(f"{ERR_STATE} pool has no unreserved assets; deposits closed")
+            minted = amount * total // net  # priced on assets net of pending claims
         if minted == 0:
             raise gl.vm.UserError(f"{ERR_PARAMS} deposit too small for current share price")
         who = _hex(gl.message.sender_address)
@@ -522,17 +598,21 @@ class PulseSLA(gl.contract.Contract):
         who = _hex(gl.message.sender_address)
         held = int(self.shares[who]) if who in self.shares else 0
         assets = int(self.pool_assets)
+        net = self._net_assets()  # assets minus capital reserved for staged claims
         total = int(self.total_shares)
-        if held == 0 or total == 0:
-            raise gl.vm.UserError(f"{ERR_LIQUIDITY} no underwriting position")
-        value = held * assets // total
+        if held == 0 or total == 0 or net == 0:
+            raise gl.vm.UserError(f"{ERR_LIQUIDITY} no redeemable underwriting position")
+        # Shares redeem at net asset value, so an LP who exits while a claim is
+        # staged takes the pro-rata share of that pending loss with them instead
+        # of leaving it to the LPs who stay.
+        value = held * net // total
         if want > value:
             raise gl.vm.UserError(f"{ERR_LIQUIDITY} amount exceeds position value")
         locked = int(self.locked_coverage)
         free = assets - locked if assets > locked else 0
         if want > free:
             raise gl.vm.UserError(f"{ERR_LIQUIDITY} capital is locked behind active coverage")
-        burn = (want * total + assets - 1) // assets  # ceil: never under-burn
+        burn = (want * total + net - 1) // net  # ceil: never under-burn
         if burn > held:
             burn = held
         # effects before interaction
@@ -582,16 +662,17 @@ class PulseSLA(gl.contract.Contract):
         assets = int(self.pool_assets)
         locked = int(self.locked_coverage)
         host = _hostname(endpoint_url)
+        apex = _apex(host)
         holder = gl.message.sender_address
         holder_hex = _hex(holder)
-        host_now = int(self.host_exposure[host]) if host in self.host_exposure else 0
+        host_now = int(self.host_exposure[apex]) if apex in self.host_exposure else 0
         holder_now = int(self.holder_exposure[holder_hex]) if holder_hex in self.holder_exposure else 0
         if cov > assets * MAX_POLICY_BPS // BPS:
             raise gl.vm.UserError(f"{ERR_CAP} coverage exceeds per-policy cap of pool depth")
         if locked + cov > assets * MAX_UTILIZATION_BPS // BPS:
             raise gl.vm.UserError(f"{ERR_CAP} pool utilization cap reached")
         if host_now + cov > assets * MAX_HOST_BPS // BPS:
-            raise gl.vm.UserError(f"{ERR_CAP} per-endpoint exposure cap reached")
+            raise gl.vm.UserError(f"{ERR_CAP} per-endpoint (registrable domain) exposure cap reached")
         if holder_now + cov > assets * MAX_HOLDER_BPS // BPS:
             raise gl.vm.UserError(f"{ERR_CAP} per-holder exposure cap reached")
 
@@ -603,6 +684,7 @@ class PulseSLA(gl.contract.Contract):
             holder=holder,
             endpoint_url=endpoint_url,
             host=host,
+            apex=apex,
             probe_mode=probe_mode,
             max_latency_ms=lat,
             min_uptime_bps=up,
@@ -630,7 +712,7 @@ class PulseSLA(gl.contract.Contract):
         )
         # effects
         self.locked_coverage = locked + cov
-        self.host_exposure[host] = host_now + cov
+        self.host_exposure[apex] = host_now + cov
         self.holder_exposure[holder_hex] = holder_now + cov
         self.active_policies = int(self.active_policies) + 1
         self.annual_premium_run_rate = int(self.annual_premium_run_rate) + premium * YEAR_SECS // duration_secs
@@ -740,7 +822,6 @@ class PulseSLA(gl.contract.Contract):
             raise gl.vm.UserError(f"{ERR_EXPECTED} probe bond {int(self.probe_bond)} required")
 
         obs = self._consensus_probe(p, now)
-        self.total_probes = int(self.total_probes) + 1
         text = _describe(obs, int(p.max_latency_ms))
         coverage = int(p.coverage)
 
@@ -749,6 +830,21 @@ class PulseSLA(gl.contract.Contract):
             assets = int(self.pool_assets)
             if payout > assets:
                 payout = assets  # bounded: can never exceed pool depth
+            # Claim velocity ceiling: a wave of breaches is paid across epochs. The
+            # claim stays staged (and the whole call reverts, refunding the bond)
+            # until the next epoch has room; the 14-day settlement window outlasts the queue.
+            # The first payout of an epoch is always allowed (progress guarantee): the
+            # ceiling shrinks with the pool and could otherwise fall below one claim.
+            paid_now, ceiling = self._velocity_window(now, assets)
+            if paid_now > 0 and paid_now + payout > ceiling:
+                raise gl.vm.UserError(f"{ERR_VELOCITY} epoch payout ceiling reached; retry next epoch")
+            epoch = now // EPOCH_SECONDS
+            if epoch != int(self.velocity_epoch):
+                self.velocity_epoch = epoch
+                self.velocity_base = assets
+                self.velocity_paid = 0
+            self.velocity_paid = int(self.velocity_paid) + payout
+            self.total_probes = int(self.total_probes) + 1
             holder = p.holder
             p.payout = payout
             p.last_reason = str(obs["reason"])
@@ -769,6 +865,7 @@ class PulseSLA(gl.contract.Contract):
             return {"paid": True, "payout": str(payout), "reason": str(obs["reason"])}
 
         # Endpoint recovered during the grace period: dismiss, resume cover.
+        self.total_probes = int(self.total_probes) + 1
         forfeit = int(self.probe_bond)
         self.pool_assets = int(self.pool_assets) + forfeit
         self.total_bond_forfeits = int(self.total_bond_forfeits) + forfeit
@@ -797,9 +894,23 @@ class PulseSLA(gl.contract.Contract):
             return _measure(url, mode, max_latency, last_block, elapsed)
 
         def validator(leaders_res: gl.vm.Result) -> bool:
-            return _verdicts_agree(leaders_res, leader, max_latency)
+            return _verdicts_agree(leaders_res, leader, max_latency, mode == MODE_RPC)
 
         return gl.vm.run_nondet(leader, validator)
+
+    def _net_assets(self) -> int:
+        """Pool assets net of capital reserved for staged claims: the basis for
+        share pricing and redemptions."""
+        assets = int(self.pool_assets)
+        reserved = int(self.reserved_payouts)
+        return assets - reserved if assets > reserved else 0
+
+    def _velocity_window(self, now: int, assets: int) -> tuple:
+        """(paid so far this epoch, payout ceiling for this epoch)."""
+        epoch = now // EPOCH_SECONDS
+        if epoch == int(self.velocity_epoch) and int(self.velocity_base) > 0:
+            return int(self.velocity_paid), int(self.velocity_base) * MAX_EPOCH_PAYOUT_BPS // BPS
+        return 0, assets * MAX_EPOCH_PAYOUT_BPS // BPS
 
     def _uptime_bps(self, p: Policy) -> int:
         total = int(p.samples_total)
@@ -832,7 +943,7 @@ class PulseSLA(gl.contract.Contract):
         if p.status == ST_BREACH_PENDING:
             self.reserved_payouts = int(self.reserved_payouts) - cov
         self.locked_coverage = int(self.locked_coverage) - cov
-        self.host_exposure[str(p.host)] = int(self.host_exposure[str(p.host)]) - cov
+        self.host_exposure[str(p.apex)] = int(self.host_exposure[str(p.apex)]) - cov
         holder_hex = _hex(p.holder)
         self.holder_exposure[holder_hex] = int(self.holder_exposure[holder_hex]) - cov
         self.active_policies = int(self.active_policies) - 1
@@ -872,6 +983,7 @@ class PulseSLA(gl.contract.Contract):
             "holder": _hex(p.holder),
             "endpoint_url": str(p.endpoint_url),
             "host": str(p.host),
+            "apex": str(p.apex),
             "probe_mode": str(p.probe_mode),
             "max_latency_ms": int(p.max_latency_ms),
             "min_uptime_bps": int(p.min_uptime_bps),

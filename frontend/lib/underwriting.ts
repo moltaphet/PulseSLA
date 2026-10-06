@@ -1,16 +1,16 @@
 import { LIMITS } from "./pricing";
 import { formatGen, parseGen } from "./units";
 
-/** Shares minted for a deposit (mirrors `deposit_underwriting`). */
-export function previewDeposit(amount: bigint, tvl: bigint, totalShares: bigint): bigint {
-  if (totalShares === 0n || tvl === 0n) return amount;
-  return (amount * totalShares) / tvl;
+/** Shares minted for a deposit (mirrors `deposit_underwriting`). Priced on `netAssets`: assets minus reserved claims. */
+export function previewDeposit(amount: bigint, netAssets: bigint, totalShares: bigint): bigint {
+  if (totalShares === 0n || netAssets === 0n) return amount;
+  return (amount * totalShares) / netAssets;
 }
 
 /** Shares burned for a withdrawal: rounded up so the pool is never under-charged. */
-export function previewWithdrawBurn(amount: bigint, tvl: bigint, totalShares: bigint): bigint {
-  if (tvl === 0n) return 0n;
-  return (amount * totalShares + tvl - 1n) / tvl;
+export function previewWithdrawBurn(amount: bigint, netAssets: bigint, totalShares: bigint): bigint {
+  if (netAssets === 0n) return 0n;
+  return (amount * totalShares + netAssets - 1n) / netAssets;
 }
 
 export interface AmountCheck {

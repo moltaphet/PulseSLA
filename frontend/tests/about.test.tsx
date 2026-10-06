@@ -11,6 +11,10 @@ describe("About page", () => {
     expect(screen.getAllByRole("listitem").length).toBeGreaterThanOrEqual(10);
     expect(screen.getByText("Pre-activation health verification")).toBeInTheDocument();
     expect(screen.getByText("7-day linear payout vesting")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Closing the structural gaps/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /What PulseSLA does not claim/ })).toBeInTheDocument();
+    expect(screen.getByText(/up to the pool's 80% maximum utilization cap/)).toBeInTheDocument();
+    expect(screen.getByText(/not continuous pings/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /GenLayer docs/ })).toHaveAttribute("href", "https://docs.genlayer.com");
   });
 

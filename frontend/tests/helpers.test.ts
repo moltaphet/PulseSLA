@@ -70,7 +70,7 @@ describe("draftPolicy", () => {
     expect(draftPolicy(form({ coverage: "11" }), ctx()).errors.coverage).toMatch(/at most 10 GEN.*per-policy cap/);
     expect(draftPolicy(form({ coverage: "5" }), ctx({ lockedCoverage: 78n * ATTO })).errors.coverage).toMatch(/utilization cap/);
     const live = { host: "rpc.node-alpha.io", holder: "0xother", coverage: 18n * ATTO, status: "ACTIVE" } as Policy;
-    expect(draftPolicy(form({ coverage: "5" }), ctx({ policies: [live] })).errors.coverage).toMatch(/per-endpoint cap/);
+    expect(draftPolicy(form({ coverage: "5" }), ctx({ policies: [live] })).errors.coverage).toMatch(/per-domain cap/);
     const mine = { host: "x.io", holder: "0xme", coverage: 19n * ATTO, status: "ACTIVE" } as Policy;
     expect(draftPolicy(form({ coverage: "5" }), ctx({ policies: [mine] })).errors.coverage).toMatch(/per-holder cap/);
   });
@@ -83,7 +83,7 @@ describe("draftPolicy", () => {
 });
 
 const policy = (over: Partial<Policy> = {}): Policy => ({
-  id: 1, holder: "0xa", endpointUrl: "https://x.io", host: "x.io", probeMode: "rpc", maxLatencyMs: 500, minUptimeBps: 9990, probeInterval: 60,
+  id: 1, holder: "0xa", endpointUrl: "https://x.io", host: "x.io", apex: "x.io", probeMode: "rpc", maxLatencyMs: 500, minUptimeBps: 9990, probeInterval: 60,
   coverage: ATTO, premium: 1n, createdAt: 0, activeFrom: 100, expiresAt: 1000, status: "ACTIVE", samplesTotal: 0, samplesOk: 0, uptimeBps: 10000,
   consecutiveFailures: 0, baselineOk: false, lastProbeAt: 0, lastBlock: 0, lastLatencyMs: 0, lastReason: "", lastOk: false, settleAt: 0,
   claimCount: 0, payout: 0n, ...over,

@@ -5,7 +5,7 @@
  * validator round by five independent simulated observations.
  */
 import {
-  BREACH_CONSECUTIVE, CAPS_BPS, LIMITS, quotePremium, vestedPayout,
+  apexOf, BREACH_CONSECUTIVE, CAPS_BPS, EPOCH_SECONDS, LIMITS, MAX_EPOCH_PAYOUT_BPS, quotePremium, SETTLE_WINDOW_SECONDS, vestedPayout,
 } from "../pricing";
 import type {
   ConsensusVote, CreatePolicyArgs, Incident, IncidentKind, Policy, PolicyStatus, PoolMetrics,
@@ -21,7 +21,7 @@ export class ProtocolError extends Error {
   }
 }
 const E = {
-  expected: "[EXPECTED]", params: "[INVALID_PARAMS]", liquidity: "[INSUFFICIENT_LIQUIDITY]",
+  velocity: "[VELOCITY_LIMIT]", expected: "[EXPECTED]", params: "[INVALID_PARAMS]", liquidity: "[INSUFFICIENT_LIQUIDITY]",
   cap: "[EXPOSURE_CAP]", state: "[INVALID_STATE]", soon: "[TOO_SOON]",
 } as const;
 
@@ -40,7 +40,7 @@ export interface SimConfig {
 export const DEFAULT_SIM_CONFIG: SimConfig = { activationDelay: 3600, claimGrace: 3600, probeBond: 10n ** 16n };
 
 const BREACH_WINDOW = 30 * 86_400;
-const SETTLE_WINDOW = 7 * 86_400;
+const SETTLE_WINDOW = SETTLE_WINDOW_SECONDS;
 const MIN_STALE_ELAPSED = 60;
 const LATENCY_TOLERANCE_BPS = 2000;
 const VALIDATORS = 5;
@@ -78,6 +78,9 @@ export class SimProtocol {
   totalBondForfeits = 0n;
   totalProbes = 0;
   totalBreaches = 0;
+  velocityEpoch = 0;
+  velocityPaid = 0n;
+  velocityBase = 0n;
   readonly shares = new Map<string, bigint>();
   readonly hostExposure = new Map<string, bigint>();
   readonly holderExposure = new Map<string, bigint>();
@@ -137,14 +140,27 @@ export class SimProtocol {
     }
   }
 
+  /** Pool assets minus capital reserved for staged claims: the basis for share pricing and redemptions. */
+  netAssets(): bigint {
+    return this.poolAssets > this.reservedPayouts ? this.poolAssets - this.reservedPayouts : 0n;
+  }
+
+  /** [paid so far this epoch, payout ceiling for this epoch] */
+  velocityWindow(now: number, assets: bigint): [bigint, bigint] {
+    const epoch = Math.floor(now / EPOCH_SECONDS);
+    if (epoch === this.velocityEpoch && this.velocityBase > 0n) return [this.velocityPaid, (this.velocityBase * MAX_EPOCH_PAYOUT_BPS) / BPS];
+    return [0n, (assets * MAX_EPOCH_PAYOUT_BPS) / BPS];
+  }
+
   // ------------------------------------------------------------ underwriting
   deposit(sender: string, amount: bigint): bigint {
     if (amount < LIMITS.minDeposit) throw new ProtocolError(E.params, "deposit below minimum");
     let minted: bigint;
     if (this.totalShares === 0n) minted = amount;
     else {
-      if (this.poolAssets === 0n) throw new ProtocolError(E.state, "pool has no assets; deposits closed");
-      minted = (amount * this.totalShares) / this.poolAssets;
+      const net = this.netAssets();
+      if (net === 0n) throw new ProtocolError(E.state, "pool has no unreserved assets; deposits closed");
+      minted = (amount * this.totalShares) / net; // priced on assets net of pending claims
     }
     if (minted === 0n) throw new ProtocolError(E.params, "deposit too small for current share price");
     this.debit(sender, amount);
@@ -157,12 +173,13 @@ export class SimProtocol {
   withdraw(sender: string, amount: bigint): bigint {
     if (amount <= 0n) throw new ProtocolError(E.params, "amount must be positive");
     const held = this.shares.get(sender) ?? 0n;
-    if (held === 0n || this.totalShares === 0n) throw new ProtocolError(E.liquidity, "no underwriting position");
-    const value = (held * this.poolAssets) / this.totalShares;
+    const net = this.netAssets();
+    if (held === 0n || this.totalShares === 0n || net === 0n) throw new ProtocolError(E.liquidity, "no redeemable underwriting position");
+    const value = (held * net) / this.totalShares;
     if (amount > value) throw new ProtocolError(E.liquidity, "amount exceeds position value");
     const free = this.poolAssets > this.lockedCoverage ? this.poolAssets - this.lockedCoverage : 0n;
     if (amount > free) throw new ProtocolError(E.liquidity, "capital is locked behind active coverage");
-    let burn = (amount * this.totalShares + this.poolAssets - 1n) / this.poolAssets;
+    let burn = (amount * this.totalShares + net - 1n) / net;
     if (burn > held) burn = held;
     this.shares.set(sender, held - burn);
     this.totalShares -= burn;
@@ -173,7 +190,7 @@ export class SimProtocol {
 
   underwriter(addr: string): UnderwriterPosition {
     const s = this.shares.get(addr) ?? 0n;
-    const value = this.totalShares > 0n ? (s * this.poolAssets) / this.totalShares : 0n;
+    const value = this.totalShares > 0n ? (s * this.netAssets()) / this.totalShares : 0n;
     const free = this.poolAssets > this.lockedCoverage ? this.poolAssets - this.lockedCoverage : 0n;
     return { shares: s, value, withdrawable: value < free ? value : free };
   }
@@ -194,11 +211,12 @@ export class SimProtocol {
     if (value < premium) throw new ProtocolError(E.expected, `premium ${premium} not covered by value ${value}`);
 
     const host = hostnameOf(a.endpointUrl);
-    const hostNow = this.hostExposure.get(host) ?? 0n;
+    const apex = apexOf(host);
+    const hostNow = this.hostExposure.get(apex) ?? 0n;
     const holderNow = this.holderExposure.get(sender) ?? 0n;
     if (a.coverage > (this.poolAssets * CAPS_BPS.policy) / BPS) throw new ProtocolError(E.cap, "coverage exceeds per-policy cap of pool depth");
     if (this.lockedCoverage + a.coverage > (this.poolAssets * CAPS_BPS.utilization) / BPS) throw new ProtocolError(E.cap, "pool utilization cap reached");
-    if (hostNow + a.coverage > (this.poolAssets * CAPS_BPS.host) / BPS) throw new ProtocolError(E.cap, "per-endpoint exposure cap reached");
+    if (hostNow + a.coverage > (this.poolAssets * CAPS_BPS.host) / BPS) throw new ProtocolError(E.cap, "per-endpoint (registrable domain) exposure cap reached");
     if (holderNow + a.coverage > (this.poolAssets * CAPS_BPS.holder) / BPS) throw new ProtocolError(E.cap, "per-holder exposure cap reached");
 
     this.debit(sender, value);
@@ -206,7 +224,7 @@ export class SimProtocol {
     const id = this.policies.length + 1;
     const activeFrom = this.now + this.cfg.activationDelay;
     this.policies.push({
-      id, holder: sender, endpointUrl: a.endpointUrl, host, probeMode: a.probeMode,
+      id, holder: sender, endpointUrl: a.endpointUrl, host, apex, probeMode: a.probeMode,
       maxLatencyMs: a.maxLatencyMs, minUptimeBps: a.minUptimeBps, probeInterval: a.probeIntervalBlocks * BLOCK_SECONDS,
       coverage: a.coverage, premium, createdAt: this.now, activeFrom, expiresAt: activeFrom + durationSecs,
       status: "ACTIVE", samplesTotal: 0, samplesOk: 0, uptimeBps: 10_000, consecutiveFailures: 0, baselineOk: false,
@@ -214,7 +232,7 @@ export class SimProtocol {
     });
     this.durations.set(id, durationSecs);
     this.lockedCoverage += a.coverage;
-    this.hostExposure.set(host, hostNow + a.coverage);
+    this.hostExposure.set(apex, hostNow + a.coverage);
     this.holderExposure.set(sender, holderNow + a.coverage);
     this.activePolicies += 1;
     this.runRate += (premium * BigInt(YEAR_SECONDS)) / BigInt(durationSecs);
@@ -378,13 +396,23 @@ export class SimProtocol {
     if (this.now < p.settleAt) throw new ProtocolError(E.soon, "claim grace period has not elapsed");
     if (this.now > p.settleAt + SETTLE_WINDOW) throw new ProtocolError(E.state, "claim lapsed; call expire_policy");
     if (bond < this.cfg.probeBond) throw new ProtocolError(E.expected, `probe bond ${this.cfg.probeBond} required`);
-    this.debit(sender, bond);
     const { leader: obs, votes } = this.consensus(p);
-    this.totalProbes += 1;
     const text = this.describe(obs, p.maxLatencyMs);
     if (!obs.ok) {
       let payout = vestedPayout(p.coverage, this.now - p.activeFrom);
       if (payout > this.poolAssets) payout = this.poolAssets;
+      // Claim velocity ceiling; the first payout of an epoch is always allowed (progress guarantee).
+      const [paidNow, ceiling] = this.velocityWindow(this.now, this.poolAssets);
+      if (paidNow > 0n && paidNow + payout > ceiling) throw new ProtocolError(E.velocity, "epoch payout ceiling reached; retry next epoch");
+      this.debit(sender, bond);
+      const epoch = Math.floor(this.now / EPOCH_SECONDS);
+      if (epoch !== this.velocityEpoch) {
+        this.velocityEpoch = epoch;
+        this.velocityBase = this.poolAssets;
+        this.velocityPaid = 0n;
+      }
+      this.velocityPaid += payout;
+      this.totalProbes += 1;
       p.payout = payout;
       p.lastReason = obs.reason;
       p.lastOk = false;
@@ -398,6 +426,8 @@ export class SimProtocol {
       this.pay(sender, bond);
       return { paid: true, payout, reason: obs.reason, votes };
     }
+    this.debit(sender, bond);
+    this.totalProbes += 1;
     const forfeit = this.cfg.probeBond;
     this.poolAssets += forfeit;
     this.totalBondForfeits += forfeit;
@@ -418,7 +448,7 @@ export class SimProtocol {
     const p = this.get(id);
     if (p.status === "BREACH_PENDING") this.reservedPayouts -= p.coverage;
     this.lockedCoverage -= p.coverage;
-    this.hostExposure.set(p.host, (this.hostExposure.get(p.host) ?? 0n) - p.coverage);
+    this.hostExposure.set(p.apex, (this.hostExposure.get(p.apex) ?? 0n) - p.coverage);
     this.holderExposure.set(p.holder, (this.holderExposure.get(p.holder) ?? 0n) - p.coverage);
     this.activePolicies -= 1;
     this.runRate -= (p.premium * BigInt(YEAR_SECONDS)) / BigInt(this.durations.get(id) ?? 1);
@@ -437,10 +467,15 @@ export class SimProtocol {
   // ------------------------------------------------------------------- views
   metrics(): PoolMetrics {
     const free = this.poolAssets > this.lockedCoverage ? this.poolAssets - this.lockedCoverage : 0n;
+    const [epochPaid, epochCeiling] = this.velocityWindow(this.now, this.poolAssets);
     return {
       tvl: this.poolAssets,
+      netAssets: this.netAssets(),
       totalShares: this.totalShares,
-      sharePrice: this.totalShares > 0n ? (this.poolAssets * ATTO) / this.totalShares : ATTO,
+      sharePrice: this.totalShares > 0n ? (this.netAssets() * ATTO) / this.totalShares : ATTO,
+      epochPaid,
+      epochCeiling,
+      maxEpochPayoutBps: Number(MAX_EPOCH_PAYOUT_BPS),
       lockedCoverage: this.lockedCoverage,
       reservedPayouts: this.reservedPayouts,
       freeLiquidity: free,

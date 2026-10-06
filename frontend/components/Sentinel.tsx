@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useProtocol } from "@/lib/hooks/useProtocol";
+import { SETTLE_WINDOW_SECONDS } from "@/lib/pricing";
 import { policyHealth, probeEligibility, probeSeries, settleEligibility } from "@/lib/policyState";
 import type { Policy } from "@/lib/types";
 import { formatBps, formatDuration, formatGen, formatTime, shortAddress, timeAgo } from "@/lib/units";
@@ -132,7 +133,7 @@ export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
                 {(() => {
                   const pe = probeEligibility(selected, now);
                   const se = settleEligibility(selected, now);
-                  const expirable = (selected.status === "ACTIVE" && now >= selected.expiresAt) || (selected.status === "BREACH_PENDING" && now > selected.settleAt + 7 * 86_400);
+                  const expirable = (selected.status === "ACTIVE" && now >= selected.expiresAt) || (selected.status === "BREACH_PENDING" && now > selected.settleAt + SETTLE_WINDOW_SECONDS);
                   return (
                     <div className="space-y-4">
                       <div className="flex flex-wrap gap-3">

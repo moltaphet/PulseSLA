@@ -111,15 +111,15 @@ describe("policy creation", () => {
     mint(sim, "0xa", { coverage: 10n * ATTO });
     mint(sim, "0xb", { coverage: 10n * ATTO }); // host at 20%
     revertsWith(() => mint(sim, "0xc", { coverage: ATTO }), "[EXPOSURE_CAP]"); // per host
-    mint(sim, "0xa", { coverage: 10n * ATTO, endpointUrl: "https://two.node.io" });
-    revertsWith(() => mint(sim, "0xa", { coverage: ATTO, endpointUrl: "https://three.node.io" }), "[EXPOSURE_CAP]"); // per holder
+    mint(sim, "0xa", { coverage: 10n * ATTO, endpointUrl: "https://rpc.two-node.io" });
+    revertsWith(() => mint(sim, "0xa", { coverage: ATTO, endpointUrl: "https://rpc.three-node.io" }), "[EXPOSURE_CAP]"); // per holder
   });
   it("caps total utilization at 80%", () => {
     const sim = world();
     const holders = ["0xa", "0xb", "0xc", "0xd", "0xe"];
-    for (let i = 0; i < 8; i++) mint(sim, holders[Math.floor(i / 2)], { coverage: 10n * ATTO, endpointUrl: `https://host${Math.floor(i / 2)}.node.io` });
+    for (let i = 0; i < 8; i++) mint(sim, holders[Math.floor(i / 2)], { coverage: 10n * ATTO, endpointUrl: `https://rpc.apex${Math.floor(i / 2)}.io` });
     expect(sim.metrics().utilizationBps).toBeLessThanOrEqual(8000);
-    revertsWith(() => mint(sim, "0xe", { coverage: 5n * ATTO, endpointUrl: "https://host9.node.io" }), "[EXPOSURE_CAP]");
+    revertsWith(() => mint(sim, "0xe", { coverage: 5n * ATTO, endpointUrl: "https://rpc.apex9.io" }), "[EXPOSURE_CAP]");
   });
   it("an empty pool writes no policies", () => {
     revertsWith(() => mint(world(0n)), "[EXPOSURE_CAP]");
@@ -264,7 +264,7 @@ describe("staged claims", () => {
     const id = mint(sim);
     stage(sim, id);
     revertsWith(() => sim.expirePolicy(id), "[INVALID_STATE]");
-    sim.advance(GRACE + 7 * 86_400 + 1);
+    sim.advance(GRACE + 14 * 86_400 + 1);
     expect(sim.expirePolicy(id)).toBe("LAPSED");
     expect(sim.metrics()).toMatchObject({ lockedCoverage: 0n, reservedPayouts: 0n });
   });
@@ -285,7 +285,7 @@ describe("solvency under simultaneous breach", () => {
     const sim = world();
     const holders = ["0xa", "0xb", "0xc", "0xd"];
     const ids: number[] = [];
-    for (let i = 0; i < 8; i++) ids.push(mint(sim, holders[Math.floor(i / 2)], { coverage: 10n * ATTO, endpointUrl: `https://host${Math.floor(i / 2)}.node.io` }));
+    for (let i = 0; i < 8; i++) ids.push(mint(sim, holders[Math.floor(i / 2)], { coverage: 10n * ATTO, endpointUrl: `https://rpc.apex${Math.floor(i / 2)}.io` }));
     expect(sim.metrics().lockedCoverage).toBe(80n * ATTO);
     sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 1 + ageDays * 86_400);
     for (const id of ids) sim.triggerProbe(BOT, id, BOND);
@@ -299,7 +299,15 @@ describe("solvency under simultaneous breach", () => {
     sim.advance(GRACE + 1);
     let paid = 0n;
     for (const id of ids) {
-      paid += sim.settleClaim(BOT, id, BOND).payout;
+      for (;;) {
+        try {
+          paid += sim.settleClaim(BOT, id, BOND).payout;
+          break;
+        } catch (e) {
+          expect((e as ProtocolError).code).toBe("[VELOCITY_LIMIT]"); // the claim waits for the next epoch
+          sim.advance(86_401);
+        }
+      }
       expect(sim.metrics().solvent).toBe(true);
       expect(sim.metrics().lockedCoverage <= sim.metrics().tvl).toBe(true);
     }
@@ -333,5 +341,83 @@ describe("demo world", () => {
     const again = createDemoWorld(T0 + 1_000_000);
     expect(again.metrics()).toEqual(sim.metrics());
     expect(again.incidents.length).toBe(sim.incidents.length);
+  });
+});
+
+describe("hardening mirrors the contract", () => {
+  it("groups exposure by registrable domain, not subdomain", () => {
+    const sim = world();
+    mint(sim, "0xa", { coverage: 10n * ATTO, endpointUrl: "https://rpc1.node.io" });
+    mint(sim, "0xb", { coverage: 10n * ATTO, endpointUrl: "https://rpc2.node.io" });
+    revertsWith(() => mint(sim, "0xc", { coverage: ATTO, endpointUrl: "https://a.b.c.node.io" }), "[EXPOSURE_CAP]");
+    mint(sim, "0xc", { coverage: ATTO, endpointUrl: "https://rpc.other-node.io" });
+    expect(sim.get(1).apex).toBe("node.io");
+  });
+
+  it("prices redemptions and deposits net of reserved payouts, so an early exit cannot dump a pending loss", () => {
+    const sim = new SimProtocol(T0);
+    for (const a of [UW, OP, BOT, "0xa"]) sim.fund(a, 10_000n * ATTO);
+    sim.deposit("0xa", 50n * ATTO);
+    sim.deposit(UW, 50n * ATTO);
+    const id = mint(sim, OP, { coverage: 10n * ATTO });
+    sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 1 + 8 * 86_400);
+    sim.setEndpoint(sim.get(id).host, "healthy");
+    sim.triggerProbe(BOT, id, BOND);
+    sim.setEndpoint(sim.get(id).host, "http502");
+    for (let i = 0; i < 3; i++) {
+      sim.advance(61);
+      sim.triggerProbe(BOT, id, BOND);
+    }
+    const m = sim.metrics();
+    expect(m.netAssets).toBe(m.tvl - 10n * ATTO);
+    const exitValue = sim.underwriter("0xa").value;
+    expect(exitValue).toBe((sim.shares.get("0xa")! * m.netAssets) / m.totalShares);
+    sim.withdraw("0xa", exitValue);
+    const exited = sim.transfers.at(-1)!.amount;
+    expect(exited).toBeLessThan(m.tvl / 2n - 4n * ATTO); // not ~half of gross TVL
+    sim.advance(GRACE + 1);
+    expect(sim.settleClaim(BOT, id, BOND).payout).toBe(10n * ATTO);
+    const stayer = sim.underwriter(UW).value;
+    const diff = stayer > exited ? stayer - exited : exited - stayer;
+    expect(diff).toBeLessThanOrEqual(1_000_000_000n);
+  });
+
+  it("caps claim velocity per epoch yet always lets the first claim of an epoch through", () => {
+    const sim = world();
+    const holders = ["0xa", "0xb", "0xc", "0xd"];
+    const ids: number[] = [];
+    for (let i = 0; i < 8; i++) ids.push(mint(sim, holders[Math.floor(i / 2)], { coverage: 10n * ATTO, endpointUrl: `https://rpc.apex${Math.floor(i / 2)}.io` }));
+    sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 1 + 8 * 86_400);
+    for (const id of ids) sim.triggerProbe(BOT, id, BOND);
+    for (const id of ids) sim.setEndpoint(sim.get(id).host, "http502");
+    for (let r = 0; r < 3; r++) {
+      sim.advance(61);
+      for (const id of ids) sim.triggerProbe(BOT, id, BOND);
+    }
+    sim.advance(GRACE + 1);
+    const tvl = sim.metrics().tvl;
+    let paid = 0n;
+    const settled = (id: number) => {
+      try {
+        paid += sim.settleClaim(BOT, id, BOND).payout;
+        return true;
+      } catch (e) {
+        expect((e as ProtocolError).code).toBe("[VELOCITY_LIMIT]");
+        return false;
+      }
+    };
+    expect(ids.filter(settled)).toHaveLength(3);
+    expect(paid).toBe(30n * ATTO);
+    expect(paid <= (tvl * 3000n) / 10_000n).toBe(true);
+    expect(sim.get(ids[3]).status).toBe("BREACH_PENDING"); // blocked claims stay staged
+    let days = 0;
+    while (ids.some((id) => sim.get(id).status === "BREACH_PENDING")) {
+      sim.advance(86_401);
+      days += 1;
+      for (const id of ids) if (sim.get(id).status === "BREACH_PENDING") settled(id);
+      expect(days).toBeLessThanOrEqual(8);
+    }
+    expect(sim.metrics().solvent).toBe(true);
+    expect(sim.metrics().totalPayouts).toBe(80n * ATTO);
   });
 });

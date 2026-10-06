@@ -29,6 +29,10 @@ export const LIMITS = {
 export const CAPS_BPS = { policy: 1000n, host: 2000n, holder: 2000n, utilization: 8000n } as const;
 
 export const BREACH_CONSECUTIVE = 3;
+export const MAX_BLOCK_DRIFT = 10;
+export const EPOCH_SECONDS = 24 * 3600;
+export const MAX_EPOCH_PAYOUT_BPS = 3000n;
+export const SETTLE_WINDOW_SECONDS = 14 * 86_400;
 export const PAYOUT_FLOOR_BPS = 2500n;
 export const PAYOUT_RAMP_SECONDS = 7 * 86_400;
 
@@ -83,6 +87,24 @@ export function hostnameOf(url: string): string {
   if (at >= 0) auth = auth.slice(at + 1);
   if (auth.startsWith("[")) return "";
   return auth.replace(/:\d*$/, "").toLowerCase().replace(/\.$/, "");
+}
+
+// Mirrors _MULTI_LABEL_SUFFIXES in the contract: a registrable-domain approximation (no full Public Suffix List on-chain).
+const MULTI_LABEL_SUFFIXES = new Set([
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "or.jp",
+  "co.kr", "co.in", "net.in", "com.br", "com.cn", "com.hk", "com.sg", "com.tw", "com.tr", "com.mx",
+  "com.ar", "co.za", "co.il", "com.ua", "com.pl",
+  "vercel.app", "netlify.app", "github.io", "gitlab.io", "pages.dev", "workers.dev", "web.app",
+  "firebaseapp.com", "herokuapp.com", "onrender.com", "fly.dev", "railway.app", "azurewebsites.net",
+  "cloudfront.net", "amazonaws.com", "elasticbeanstalk.com", "appspot.com", "ngrok.io", "ngrok-free.app",
+]);
+
+/** Registrable domain (eTLD+1) of a hostname; the unit of the per-host exposure cap. Mirrors the contract's `_apex`. */
+export function apexOf(host: string): string {
+  const labels = host.split(".");
+  if (labels.length <= 2 || labels.every((l) => /^\d+$/.test(l))) return host;
+  const lastTwo = labels.slice(-2).join(".");
+  return MULTI_LABEL_SUFFIXES.has(lastTwo) ? labels.slice(-3).join(".") : lastTwo;
 }
 
 const BLOCKED_SUFFIXES = [".local", ".localhost", ".internal", ".lan", ".home", ".nip.io", ".sslip.io", ".xip.io"];
@@ -179,7 +201,7 @@ export function exposureFor(policies: readonly Policy[], host: string, holder: s
   const hl = holder.toLowerCase();
   for (const p of policies) {
     if (p.status !== "ACTIVE" && p.status !== "BREACH_PENDING") continue;
-    if (p.host === host) h += p.coverage;
+    if (apexOf(p.host) === apexOf(host)) h += p.coverage;
     if (p.holder.toLowerCase() === hl) o += p.coverage;
   }
   return { host: h, holder: o };

@@ -43,7 +43,7 @@ export interface PolicyDraft {
 const CAP_TEXT: Record<CapName, string> = {
   policy: "the per-policy cap (10% of pool depth)",
   utilization: "the pool utilization cap (80%)",
-  host: "the per-endpoint cap (20% of pool depth)",
+  host: "the per-domain cap (20% of pool depth across all subdomains)",
   holder: "your per-holder cap (20% of pool depth)",
 };
 
