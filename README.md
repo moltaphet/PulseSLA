@@ -89,16 +89,36 @@ Challengers ──bond────▶ │                    (web consensus)    
 
 ### Economic assumptions and known limitations
 
-These are disclosed on purpose. The safeguards above **bound and slow** the losses described here; they do not remove them.
+These are disclosed on purpose. The safeguards above **bound and slow** the losses described here; they do not remove them. The first three are *residual risks* that remain by design.
 
-1. **Operator self-collusion is bounded, not eliminated.** An operator who controls several endpoints, on different registrable domains, and buys policies from several fresh addresses can, after the 7-day vesting period, stage claims by taking those endpoints down. In aggregate this can extract **up to the pool's 80% maximum utilization cap**. The mechanics that limit it are the per-policy (10%), per-domain (20%) and per-holder (20%) caps, the 3-failure-plus-grace rule, and the claim velocity ceiling, which spreads payouts over several epochs. Staged claims are public on-chain for the whole grace period, so underwriters can see the pressure building. The attacker still pays premiums and bears the cost of their own downtime. At the current parameters, however, a fully vested payout (100% of coverage) can exceed those costs. The parameters (caps, vesting length, premium rates) are the primary defence and are set at deployment or in the contract source, and **underwriters should size liquidity buffers with this scenario in mind**. The protocol has no identity layer, so it cannot tell fresh addresses apart from independent customers.
-2. **Uptime is measured from transaction-triggered samples, not continuous monitoring.** There is no centralized pinger and no wall-clock heartbeat. A probe happens only when someone calls `trigger_probe`, no more often than the policy's interval. Reported uptime is the ratio of healthy to total samples in a 30-day window, and is not time-weighted. An outage that falls between probes is invisible. If nobody probes, nothing is detected. The incentive to probe is the refunded bond when a failure is found, plus underwriters' and policyholders' own interest in running keepers.
-3. **Latency is not enforced on-chain** (see §6).
-4. **Redemptions are priced conservatively, and deposits pause during claims.** Shares redeem at assets minus the *full* reserved coverage. If a staged claim is later dismissed, or pays less than full coverage because of vesting, the difference accrues to the LPs who stayed, not to those who exited meanwhile. New deposits are rejected for as long as any claim is reserved (the grace period, plus any velocity-queue wait), so fresh liquidity cannot enter during that time.
-5. **Block-height bounds trade liveness for safety.** A validator reading more than 2 blocks *behind* the leader (for example a load-balanced RPC with an inconsistent backend), or more than 10 *ahead*, rejects the round and the probe is retried with another leader. The stale check itself is unchanged (`block ≤ last_block` after at least 60 s): a rule such as "stale only if `block + 10 ≤ last_block`" was considered and rejected, because it would stop a genuinely frozen node (where the two heights are equal) from ever being detected.
-6. **Domain grouping is an approximation.** A full Public Suffix List cannot be embedded in a contract. The contract uses the last two labels plus a built-in list of common multi-label and hosting-platform suffixes.
-7. **Payouts can be delayed by the velocity ceiling.** In a mass-breach event a claim may wait several epochs. The first claim of each epoch is guaranteed.
-8. Validators are assumed to be honest-majority, as in all GenLayer contracts.
+#### Residual risk 1: the deposit freeze is a deliberate trade-off, and a griefing vector
+
+`[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]` is an intentional security trade-off. While any claim is staged (`BREACH_PENDING`), new LP deposits are rejected for as long as that claim stays reserved: the grace period, plus any wait in the claim-velocity queue, up to the 14-day settlement window in the worst case (typically far shorter). The cost is that fresh liquidity cannot enter during that time. The benefit is that it **permanently eliminates** zero-risk share arbitrage (staging a breach, buying discounted shares, and profiting when the claim is dismissed) and LP dilution.
+
+- **Withdrawals are not frozen.** LPs can redeem at any time, at net asset value. What cannot leave is capital that is *locked behind live coverage* or *reserved for a staged claim*; the rest is withdrawable.
+- **Griefing vector.** A holder who controls an insured endpoint can freeze deposits by taking it down and staging a claim. The attacker pays the premium and bears the downtime. If the claim is paid they recover coverage; if it is dismissed they have only paid for the delay. Parameter caps (per-policy, per-domain, per-holder, claim velocity) bound how often and how widely this can be done, but do not prevent it.
+
+#### Residual risk 2: self-collusion up to the 80% utilization boundary
+
+A malicious operator who insures their own infrastructure, is willing to forfeit its operational reputation, and waits out the linear vesting schedule can extract **up to the protocol's 80% maximum utilization cap**. This needs control of several endpoints on different registrable domains and policies from several fresh addresses, because of the per-policy (10%), per-domain (20%) and per-holder (20%) caps. The 3-failure-plus-grace rule and the claim velocity ceiling also stretch the extraction over several epochs, and staged claims are visible on-chain throughout the grace period. The attacker still pays premiums, but at the current parameters a fully vested payout (100% of coverage) can exceed their costs. The protocol has no identity layer, so it cannot tell fresh addresses from independent customers.
+
+> **Underwriters must treat the 80% utilization ceiling as an economic invariant of the pool, not as a safe operating point.** Maintain liquidity buffers sized for that ceiling and price risk accordingly. Premium rates, caps and vesting length are the primary defences, and they are fixed in the contract source.
+
+#### Residual risk 3: conservative early-exit penalty
+
+An LP who redeems shares during an active `BREACH_PENDING` window absorbs the **full** pending reserved liability, even if the claim is later dismissed because the endpoint recovered, or pays less than full coverage because of vesting. The difference accrues to the LPs who stayed. This conservative penalty is enforced on purpose: it completely prevents front-running withdrawals, where an LP would leave just before a claim settles and shift the loss onto the remaining LPs. Redemptions are priced on `assets − reserved_payouts`.
+
+#### Uptime measurement and clock execution
+
+- **Uptime comes from probe transactions, not continuous pings.** There is no centralized pinger and no wall-clock heartbeat. A probe happens only when someone submits `trigger_probe`, no more often than the policy's interval, and is decided by decentralized validator consensus on-chain. Reported uptime is the ratio of healthy to total samples in a 30-day window and is not time-weighted. An outage that falls between probes is invisible, and if nobody probes, nothing is detected. The incentive to probe is the refunded bond when a failure is found, plus underwriters' and policyholders' own interest in running keepers.
+- **Latency validation runs in the local test harness, not on-chain.** GenVM exposes no clock that advances across a web request, so measured latency is always 0 ms on Studio Next. The latency comparison is exercised in the direct-test harness, where the clock is patched. On the live network, status codes, JSON-RPC payloads and stale-block detection are enforced; latency is not (see §6).
+
+#### Other limitations
+
+- **Block-height bounds trade liveness for safety.** A validator reading more than 2 blocks *behind* the leader (for example a load-balanced RPC with an inconsistent backend), or more than 10 *ahead*, rejects the round and the probe is retried with another leader. The stale check itself is unchanged (`block ≤ last_block` after at least 60 s): a rule such as "stale only if `block + 10 ≤ last_block`" was considered and rejected, because it would stop a genuinely frozen node (where the two heights are equal) from ever being detected.
+- **Domain grouping is an approximation.** A full Public Suffix List cannot be embedded in a contract. The contract uses the last two labels plus a built-in list of common multi-label and hosting-platform suffixes.
+- **Payouts can be delayed by the velocity ceiling.** In a mass-breach event a claim may wait several epochs. The first claim of each epoch is guaranteed.
+- Validators are assumed to be honest-majority, as in all GenLayer contracts.
 
 ## 4. Specification
 
