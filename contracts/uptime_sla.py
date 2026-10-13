@@ -1,35 +1,48 @@
-# v0.3.0
+# v0.4.0
 # { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 # PulseSLA -- Parametric SLA & Infrastructure Downtime Insurance Protocol.
 #
 # Underwriters pool native GEN and earn premiums; infrastructure teams buy
-# parametric policies on an HTTP / JSON-RPC endpoint; anyone may trigger a
-# health probe by posting a small bond. A probe is a non-deterministic web
-# round: the leader measures the endpoint (HTTP status, latency, block
-# freshness) and every validator re-measures it independently. The VERDICT
-# (healthy / failing) must agree; raw latency and block height never have to.
-# When failures cross the policy's SLA thresholds a claim is staged, survives a
-# grace period, is re-verified by a second consensus round, and only then pays.
+# parametric policies on a *registered* JSON-RPC endpoint; anyone may trigger a
+# health round by posting a small bond.
 #
-# Anti-collusion (an operator insuring its own node and pulling it down):
-#   * activation delay      -- a policy cannot be probed or claimed immediately;
-#   * healthy-baseline rule -- cover only exists once the endpoint was seen
-#                              healthy, so buying cover on a dead node pays 0;
-#   * staged claims         -- N consecutive failing probes, then a grace period,
-#                              then a fresh consensus re-verification;
-#   * payout vesting ramp   -- a young policy pays only a fraction of coverage;
-#   * exposure caps         -- per policy, per endpoint host, per holder and in
-#                              total, all relative to the pool's locked depth.
+# Moral-hazard model. The protocol must not pay a holder who controls the
+# insured service, picks the observations that establish the breach, and
+# collects a vested payout without independent proof. Three layers close that:
 #
-# Solvency invariant (checked by every test): locked_coverage <= pool_assets.
+#   1. AUTHENTICATED REGISTRY -- a policy never carries a holder-supplied URL.
+#      It references an `endpoint_id` listed by the governor: a public provider
+#      endpoint bound to its domain, chain id and a commitment hash, verified by
+#      consensus (`eth_chainId`) at listing, immutable afterwards, and insurable
+#      only after a listing delay.
+#   2. CORROBORATED TELEMETRY -- every round measures the insured endpoint AND
+#      independent reference endpoints (other providers, same chain). The round
+#      verdict is HEALTHY / FAILING / INCONCLUSIVE; a failure only counts when a
+#      quorum of references is healthy (otherwise the outage is the observer's,
+#      not the provider's), staleness is judged against the reference head, and
+#      every validator must independently reach the same verdict.
+#   3. CONTINUITY + VESTING -- a breach needs consecutive failing rounds that
+#      span a minimum wall-clock time AND a minimum number of reference-chain
+#      blocks, then a grace period and a fresh corroborated re-verification.
+#      The confirmed payout is released after a cooldown, linearly, on top of
+#      the age ramp, per-epoch ceiling and exposure caps.
+#
+# Enforced SLA metrics are exactly two: availability (HTTP 200 + a valid
+# JSON-RPC block number) and freshness (block height vs the reference head).
+# Latency is NOT enforced: GenVM has no clock that advances across a web
+# request, and a single vantage point's latency is not a representative
+# measurement. It was removed rather than left as an unenforceable promise.
+#
+# Solvency invariant (checked by every test):
+#     reserved_payouts <= locked_coverage <= pool_assets.
 # Coverage is locked at policy creation, so a payout (always <= coverage) lowers
 # pool_assets and locked_coverage together and can never overdraw the pool.
 
+import hashlib
 import ipaddress
 import json
 import re
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -50,25 +63,37 @@ ERR_LIQUIDITY = "[INSUFFICIENT_LIQUIDITY]"
 ERR_CAP = "[EXPOSURE_CAP]"
 ERR_STATE = "[INVALID_STATE]"
 ERR_TOO_SOON = "[TOO_SOON]"
+ERR_VELOCITY = "[VELOCITY_LIMIT]"
+ERR_DEPOSITS_FROZEN = "[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]"
+ERR_UNAUTH_ENDPOINT = "[UNAUTHENTICATED_ENDPOINT]"  # not in the registry / not insurable
+ERR_REGISTRY = "[REGISTRY_REJECTED]"  # a listing failed validation or authentication
+ERR_INCONCLUSIVE = "[INCONCLUSIVE]"  # round could not be corroborated; nothing changed
 
 # --- Policy lifecycle -------------------------------------------------------
 ST_ACTIVE = "ACTIVE"
 ST_BREACH_PENDING = "BREACH_PENDING"  # claim staged; payout reserved
-ST_PAID = "PAID"
+ST_VESTING = "VESTING"  # breach confirmed; payout releasing over the vesting schedule
+ST_PAID = "PAID"  # fully released
 ST_EXPIRED = "EXPIRED"
 ST_LAPSED = "LAPSED"  # claim not settled inside the settlement window
 
-# --- Probe verdict reasons --------------------------------------------------
+EP_LISTED = "LISTED"
+EP_DELISTED = "DELISTED"
+
+# --- Round verdicts and reasons ----------------------------------------------
+V_HEALTHY = "HEALTHY"
+V_FAILING = "FAILING"
+V_INCONCLUSIVE = "INCONCLUSIVE"
+VERDICTS = (V_HEALTHY, V_FAILING, V_INCONCLUSIVE)
+
 R_OK = "OK"
 R_HTTP_ERROR = "HTTP_ERROR"
 R_UNREACHABLE = "UNREACHABLE"
-R_HIGH_LATENCY = "HIGH_LATENCY"
-R_STALE_BLOCK = "STALE_BLOCK"
 R_BAD_PAYLOAD = "BAD_PAYLOAD"
-
-MODE_RPC = "rpc"  # POST eth_blockNumber: status + latency + block freshness
-MODE_HTTP = "http"  # GET: status + latency only
-VALID_MODES = (MODE_RPC, MODE_HTTP)
+R_STALE_BLOCK = "STALE_BLOCK"  # target lags the corroborated reference head
+R_RATE_LIMITED = "RATE_LIMITED"  # HTTP 429: not a representative outage -> INCONCLUSIVE
+R_NO_BASELINE = "NO_BASELINE"  # reference quorum unavailable -> INCONCLUSIVE
+TARGET_FAIL_REASONS = (R_HTTP_ERROR, R_UNREACHABLE, R_BAD_PAYLOAD, R_RATE_LIMITED)
 
 # --- Economics (atto-scale: value * 10 ** 18) -------------------------------
 ATTO = 10**18
@@ -88,13 +113,11 @@ MIN_PREMIUM_BPS = 10  # premium floor: 0.10% of coverage
 
 # --- Exposure caps (bps of pool_assets) -------------------------------------
 MAX_POLICY_BPS = 1000  # one policy <= 10% of the pool
-MAX_HOST_BPS = 2000  # all policies on one endpoint host <= 20%
+MAX_HOST_BPS = 2000  # all policies on one provider domain <= 20%
 MAX_HOLDER_BPS = 2000  # all policies of one holder <= 20%
 MAX_UTILIZATION_BPS = 8000  # locked coverage <= 80% of the pool
 
 # --- Policy parameter bounds -------------------------------------------------
-MIN_LATENCY_MS = 50
-MAX_LATENCY_MS = 30000
 MIN_UPTIME_BPS = 9000
 MAX_UPTIME_BPS = 9999
 MIN_DURATION_BLOCKS = 300  # ~1 hour
@@ -102,27 +125,41 @@ MAX_DURATION_BLOCKS = 2_628_000  # ~1 year
 MIN_INTERVAL_BLOCKS = 5  # ~1 minute
 MAX_INTERVAL_BLOCKS = 7200  # ~1 day
 
-# --- Staged claim parameters -------------------------------------------------
-BREACH_CONSECUTIVE = 3  # consecutive failing probes needed to stage a claim
-MEASUREMENT_WINDOW = 30 * 24 * 3600  # uptime sample window (30 days)
+# --- Authenticated registry --------------------------------------------------
+MAX_ENDPOINTS = 32
+LISTING_DELAY_SECS = 24 * 3600  # a new listing is insurable only after this
+ATTESTATION_PREFIX = "pulsesla/v1"
+MAX_ID_LEN = 32
+MAX_PROVIDER_LEN = 48
+MAX_CHAIN_ID = 2**32
+
+# --- Corroboration -------------------------------------------------------------
+MIN_REFERENCES = 3  # independent-provider references required per round
+MAX_REFERENCES = 4
+MAX_LAG_BLOCKS = 50  # target this far behind the reference head is stale (~10 min)
+
+# --- Continuity and staged claims ----------------------------------------------
+BREACH_CONSECUTIVE = 3  # consecutive FAILING rounds needed to stage a claim
+MIN_OUTAGE_SECS = 15 * 60  # ...spanning at least this much block-clock time
+MIN_OUTAGE_BLOCKS = 25  # ...and at least this many reference-chain blocks
+MEASUREMENT_WINDOW = 30 * 24 * 3600  # uptime window (30 days)
+MIN_UPTIME_WINDOW = 24 * 3600  # uptime is never judged on a window shorter than this
 SETTLE_WINDOW = 14 * 24 * 3600  # after settle_at, a claim lapses (outlasts the velocity queue)
 PAYOUT_FLOOR_BPS = 2500  # a brand-new policy vests 25% of coverage ...
 PAYOUT_RAMP_SECS = 7 * 24 * 3600  # ... rising linearly to 100% over 7 days
-MIN_STALE_ELAPSED = 60  # block must advance if >= this many seconds passed
-LATENCY_TOLERANCE_BPS = 2000  # validators accept latency verdicts +-20% of limit
+PAYOUT_COOLDOWN_SECS = 24 * 3600  # nothing is releasable for this long after confirmation
+PAYOUT_VEST_SECS = 3 * 24 * 3600  # ...then the payout streams out linearly over this
 
-# Rogue-leader bounds (see _verdicts_agree): independent observations of one
+# Rogue-leader bounds (see _round_agrees): independent observations of one
 # chain can differ by a few blocks, never by more than this.
 MAX_BLOCK_DRIFT = 10  # leader may be up to this many blocks BEHIND a validator
-MAX_BLOCK_AHEAD = 2  # ...but at most this many AHEAD, so a stored height is a conservative lower bound
+MAX_BLOCK_AHEAD = 2  # ...but at most this many AHEAD, so a reported head is a conservative lower bound
 MAX_BLOCK_HEIGHT = 2**53  # beyond any real chain; rejects absurd leader values
 
 # Claim velocity: payouts per epoch are capped at a share of pool assets, so a
 # wave of simultaneous breaches is paid out over several epochs, not in one step.
 EPOCH_SECONDS = 24 * 3600
 MAX_EPOCH_PAYOUT_BPS = 3000  # 30% of pool assets per epoch
-ERR_VELOCITY = "[VELOCITY_LIMIT]"
-ERR_DEPOSITS_FROZEN = "[DEPOSITS_FROZEN_DURING_PENDING_CLAIMS]"
 
 # Multi-label public suffixes, so that exposure is grouped by registrable domain
 # (eTLD+1) rather than by subdomain. A full Public Suffix List cannot be embedded
@@ -148,6 +185,8 @@ _BLOCKED_SUFFIXES = (
     ".xip.io",
 )
 _LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +208,8 @@ def _hostname(url: str) -> str:
 def _is_safe_endpoint(url: str) -> bool:
     """Deterministic SSRF guard: http(s) only, no credentials / backslashes,
     no loopback / private / link-local / reserved addresses, no numeric-host
-    encodings (hex, decimal, octal) and no internal-only suffixes."""
+    encodings (hex, decimal, octal) and no internal-only suffixes. Applied to
+    governor listings, which are additionally https-only."""
     if "\\" in url or len(url) > 512 or url != url.strip():
         return False
     low = url.lower()
@@ -207,8 +247,9 @@ def _is_safe_endpoint(url: str) -> bool:
 
 def _apex(host: str) -> str:
     """Registrable domain (eTLD+1) of a hostname, used to group exposure so that
-    cycling subdomains (a.node.io, b.node.io, ...) cannot bypass the per-host cap.
-    IP literals are returned unchanged."""
+    cycling subdomains (a.node.io, b.node.io, ...) cannot bypass the per-provider
+    cap, and to keep a provider from corroborating itself. IP literals are
+    returned unchanged."""
     labels = host.split(".")
     if len(labels) <= 2 or all(p.isdigit() for p in labels):
         return host
@@ -216,6 +257,13 @@ def _apex(host: str) -> str:
     if last_two in _MULTI_LABEL_SUFFIXES and len(labels) >= 3:
         return ".".join(labels[-3:])
     return last_two
+
+
+def _attestation(endpoint_id: str, provider: str, domain: str, chain_id: int, url: str) -> str:
+    """Commitment hash a listing must carry. Anyone can recompute it off-chain
+    and compare it with the provider's own published documentation."""
+    material = f"{ATTESTATION_PREFIX}|{endpoint_id}|{provider}|{domain}|{chain_id}|{url}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _tier_rate_bps(min_uptime_bps: int) -> int:
@@ -243,43 +291,29 @@ def _vested_payout(coverage: int, age_secs: int) -> int:
     return coverage * bps // BPS
 
 
-def _clock_us() -> int:
-    """Best-effort microsecond clock for latency.
-
-    KNOWN LIMITATION (verified on Studio Next): neither `time.perf_counter()` nor
-    `gl.vm.trace_time_micro()` advances across a web request inside GenVM, so the
-    measured latency is 0 ms on-chain. HTTP status, payload validity and block
-    freshness are enforced; the latency threshold only bites where the clock
-    works (the direct-test harness). `gl.vm.get_timestamp()` has one-second
-    resolution, too coarse to enforce millisecond limits without false breaches."""
-    try:
-        t = gl.vm.trace_time_micro()
-        if isinstance(t, int) and t > 0:
-            return t
-    except Exception:
-        pass
-    return int(time.perf_counter() * 1_000_000)
+def _releasable(payout: int, vest_start: int, now: int) -> int:
+    """Cumulative amount of a confirmed payout that may have been released by
+    `now`: nothing during the cooldown, then a linear stream."""
+    t = now - vest_start - PAYOUT_COOLDOWN_SECS
+    if t <= 0:
+        return 0
+    if t >= PAYOUT_VEST_SECS:
+        return payout
+    return payout * t // PAYOUT_VEST_SECS
 
 
-def _measure(url: str, mode: str, max_latency_ms: int, last_block: int, elapsed: int) -> dict:
-    """One health observation. Runs inside the non-deterministic block on the
-    leader AND on every validator. Never raises: an endpoint that cannot be
-    reached IS the observation. Returns a calldata-safe dict."""
+def _rpc_call(url: str, method: str) -> tuple:
+    """POST one JSON-RPC request. Never raises: an endpoint that cannot be
+    reached IS the observation. Returns (reachable, status, parsed result)."""
     reachable = True
     status = 0
     body_text = ""
-    started = _clock_us()
     try:
-        if mode == MODE_RPC:
-            res = gl.nondet.web.post(
-                url,
-                body=json.dumps(
-                    {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}
-                ).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-        else:
-            res = gl.nondet.web.get(url)
+        res = gl.nondet.web.post(
+            url,
+            body=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": []}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
         status = int(getattr(res, "status", 0) or 0)
         raw = getattr(res, "body", None)
         if isinstance(raw, (bytes, bytearray)):
@@ -288,120 +322,205 @@ def _measure(url: str, mode: str, max_latency_ms: int, last_block: int, elapsed:
             body_text = raw
     except Exception:
         reachable = False
-    latency_ms = max(0, (_clock_us() - started) // 1000)
-
-    block = -1
-    payload_ok = True
-    if mode == MODE_RPC and reachable and status == 200:
-        payload_ok = False
+    result = -1
+    if reachable and status == 200:
         try:
             data = json.loads(body_text)
-            result = data.get("result") if isinstance(data, dict) else None
-            if isinstance(result, str) and result.startswith("0x") and len(result) > 2:
-                block = int(result, 16)
-                payload_ok = block >= 0
+            value = data.get("result") if isinstance(data, dict) else None
+            if isinstance(value, str) and value.startswith("0x") and len(value) > 2:
+                result = int(value, 16)
         except Exception:
-            payload_ok = False
+            result = -1
+    return reachable, status, result
 
+
+def _observe(url: str) -> dict:
+    """One availability observation of one endpoint (`eth_blockNumber`).
+    Runs inside the non-deterministic block on the leader AND on every
+    validator. Returns a calldata-safe dict."""
+    reachable, status, block = _rpc_call(url, "eth_blockNumber")
     if not reachable:
         reason = R_UNREACHABLE
+    elif status == 429:
+        reason = R_RATE_LIMITED
     elif status != 200:
         reason = R_HTTP_ERROR
-    elif not payload_ok:
+    elif block <= 0:
         reason = R_BAD_PAYLOAD
-    elif latency_ms > max_latency_ms:
-        reason = R_HIGH_LATENCY
-    elif mode == MODE_RPC and last_block > 0 and elapsed >= MIN_STALE_ELAPSED and block <= last_block:
-        reason = R_STALE_BLOCK
+        block = -1
     else:
         reason = R_OK
+    return {"ok": reason == R_OK, "reason": reason, "status": status, "block": block}
 
+
+def _classify(t_ok: bool, t_reason: str, t_block: int, refs: list, n_refs: int) -> tuple:
+    """Deterministic round verdict from raw observations.
+
+    Returns (verdict, reason, ref_head, refs_ok).
+
+    * Fewer than MIN_REFERENCES references, or no strict-majority of them
+      healthy, means the baseline is missing: the failure (if any) cannot be
+      told apart from the observer's own connectivity -> INCONCLUSIVE.
+    * ref_head is the LOWER median of healthy reference heights, so a single
+      ahead-of-the-pack reference cannot make a healthy target look stale.
+    * A target behind ref_head by more than MAX_LAG_BLOCKS is stale.
+    * A rate-limited target is INCONCLUSIVE: throttling is not a representative
+      provider outage and must not be inducible by a hostile holder."""
+    healthy = sorted(int(r["block"]) for r in refs if r["ok"] and int(r["block"]) > 0)
+    quorum = n_refs // 2 + 1
+    if n_refs < MIN_REFERENCES or len(healthy) < quorum:
+        return V_INCONCLUSIVE, R_NO_BASELINE, -1, len(healthy)
+    head = healthy[(len(healthy) - 1) // 2]
+    if t_ok:
+        if t_block + MAX_LAG_BLOCKS < head:
+            return V_FAILING, R_STALE_BLOCK, head, len(healthy)
+        return V_HEALTHY, R_OK, head, len(healthy)
+    if t_reason == R_RATE_LIMITED:
+        return V_INCONCLUSIVE, R_RATE_LIMITED, head, len(healthy)
+    return V_FAILING, t_reason, head, len(healthy)
+
+
+def _round(target_url: str, refs: list) -> dict:
+    """One corroborated round: the target plus every reference endpoint.
+    `refs` is a list of (id, url). Never raises."""
+    t = _observe(target_url)
+    observed = []
+    for ref_id, ref_url in refs:
+        o = _observe(ref_url)
+        observed.append({"id": ref_id, "ok": o["ok"], "block": o["block"]})
+    verdict, reason, head, refs_ok = _classify(t["ok"], t["reason"], t["block"], observed, len(refs))
     return {
-        "ok": reason == R_OK,
+        "verdict": verdict,
         "reason": reason,
-        "status": status,
-        "latency_ms": latency_ms,
-        "block": block,
+        "status": t["status"],
+        "block": t["block"],
+        "ref_head": head,
+        "refs_ok": refs_ok,
+        "refs_total": len(refs),
+        "t_ok": t["ok"],
+        "t_reason": t["reason"],
+        "refs": observed,
     }
 
 
-def _verdicts_agree(leaders_res, leader_fn, max_latency_ms: int, rpc_mode: bool) -> bool:
-    """Validator rule.
+def _sane_height(value, ok: bool) -> bool:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return False
+    if value < -1 or value == 0 or value > MAX_BLOCK_HEIGHT:
+        return False
+    return value > 0 if ok else True
 
-    1. The healthy/failing verdict must match (the failure CLASS need not).
-    2. The leader's block height is bounded against this validator's OWN
-       observation, asymmetrically: validator - MAX_BLOCK_DRIFT <= leader <=
-       validator + MAX_BLOCK_AHEAD. The contract stores the LEADER's height as
-       `last_block` (validators return only a vote), so requiring the leader not
-       to be ahead of any accepting validator makes the stored value a
-       conservative lower bound of what the validators saw. A Byzantine leader
-       cannot inflate it to fabricate STALE_BLOCK verdicts on a slow chain.
-       Negative, zero-on-success or absurd heights are rejected outright.
-    3. A verdict split that is purely a latency call within +-20% of the limit is
-       tolerated, because latency jitter between vantage points is not a lie."""
+
+def _round_agrees(leaders_res, mine_fn, expected_ids: list) -> bool:
+    """Validator rule: independent corroboration.
+
+    1. The leader's result must be well-formed and EXACTLY cover the expected
+       reference set (a leader cannot drop an inconvenient reference).
+    2. The leader's verdict must be what its own raw observations imply
+       (`_classify` is re-run), so derived fields cannot be forged.
+    3. This validator re-measures the target and every reference itself and
+       must reach the SAME verdict. The failure class need not match.
+    4. Heights are bounded asymmetrically against this validator's own
+       observation: validator - MAX_BLOCK_DRIFT <= leader <= validator +
+       MAX_BLOCK_AHEAD, for both the target and the reference head, so a
+       Byzantine leader cannot inflate the reference head to fabricate lag."""
     if not isinstance(leaders_res, gl.vm.Return):
         return False
     lead = leaders_res.calldata
     if not isinstance(lead, dict):
         return False
-    for key in ("ok", "reason", "status", "latency_ms", "block"):
+    for key in ("verdict", "reason", "status", "block", "ref_head", "refs_ok", "refs_total", "t_ok", "t_reason", "refs"):
         if key not in lead:
             return False
-    if not isinstance(lead["ok"], bool):
+    if lead["verdict"] not in VERDICTS or not isinstance(lead["reason"], str):
         return False
-    lead_block = lead["block"]
-    if not isinstance(lead_block, int) or isinstance(lead_block, bool):
+    if not isinstance(lead["t_ok"], bool) or not isinstance(lead["t_reason"], str):
         return False
-    if lead_block < -1 or lead_block == 0 or lead_block > MAX_BLOCK_HEIGHT:
+    if lead["t_ok"] != (lead["t_reason"] == R_OK):
         return False
-    if lead["ok"] and lead["status"] != 200:
+    if not lead["t_ok"] and lead["t_reason"] not in TARGET_FAIL_REASONS:
         return False
-    if lead["ok"] and rpc_mode and lead_block < 0:
-        return False
-    mine = leader_fn()
-    my_block = mine["block"]
-    if lead_block > 0:
-        if my_block > 0:
-            delta = lead_block - my_block
-            if delta > MAX_BLOCK_AHEAD or -delta > MAX_BLOCK_DRIFT:
-                return False
-        elif lead["reason"] in (R_OK, R_HIGH_LATENCY):
-            # The leader's height would be stored but this validator cannot
-            # corroborate any height: refuse rather than accept it unchecked.
+    for key in ("status", "refs_ok", "refs_total"):
+        if not isinstance(lead[key], int) or isinstance(lead[key], bool):
             return False
-    if bool(lead["ok"]) == bool(mine["ok"]):
+    if lead["t_ok"] and lead["status"] != 200:
+        return False
+    if not _sane_height(lead["block"], lead["t_ok"]):
+        return False
+    if not isinstance(lead["ref_head"], int) or isinstance(lead["ref_head"], bool):
+        return False
+    refs = lead["refs"]
+    if not isinstance(refs, list) or len(refs) != len(expected_ids) or lead["refs_total"] != len(expected_ids):
+        return False
+    for ref, want in zip(refs, expected_ids):
+        if not isinstance(ref, dict) or ref.get("id") != want or not isinstance(ref.get("ok"), bool):
+            return False
+        if not _sane_height(ref.get("block"), ref["ok"]):
+            return False
+    verdict, reason, head, refs_ok = _classify(lead["t_ok"], lead["t_reason"], lead["block"], refs, len(expected_ids))
+    if (verdict, reason, head, refs_ok) != (lead["verdict"], lead["reason"], lead["ref_head"], lead["refs_ok"]):
+        return False
+    mine = mine_fn()
+    if mine["verdict"] != lead["verdict"]:
+        return False
+    if lead["verdict"] == V_INCONCLUSIVE:
         return True
-    if lead["reason"] in (R_OK, R_HIGH_LATENCY) and mine["reason"] in (R_OK, R_HIGH_LATENCY):
-        lo = max_latency_ms * (BPS - LATENCY_TOLERANCE_BPS) // BPS
-        hi = max_latency_ms * (BPS + LATENCY_TOLERANCE_BPS) // BPS
-        return lo <= int(lead["latency_ms"]) <= hi and lo <= int(mine["latency_ms"]) <= hi
-    return False
+    pairs = [(lead["ref_head"], mine["ref_head"])]
+    if lead["block"] > 0 and mine["block"] > 0:
+        pairs.append((lead["block"], mine["block"]))
+    for lead_h, my_h in pairs:
+        if my_h <= 0:
+            return False
+        delta = lead_h - my_h
+        if delta > MAX_BLOCK_AHEAD or -delta > MAX_BLOCK_DRIFT:
+            return False
+    return True
 
 
-def _describe(obs: dict, max_latency_ms: int) -> str:
-    reason = obs["reason"]
-    if reason == R_OK:
-        return f"healthy: HTTP 200 in {obs['latency_ms']}ms, block {obs['block']}"
+def _describe(obs: dict) -> str:
+    verdict, reason = obs["verdict"], obs["reason"]
+    corroboration = f"{obs['refs_ok']}/{obs['refs_total']} references healthy, reference head {obs['ref_head']}"
+    if verdict == V_HEALTHY:
+        return f"healthy: HTTP 200, block {obs['block']} ({corroboration})"
+    if verdict == V_INCONCLUSIVE:
+        if reason == R_RATE_LIMITED:
+            return f"endpoint rate-limited the observers; not a representative outage ({corroboration})"
+        return f"not corroborated: reference baseline unavailable ({obs['refs_ok']}/{obs['refs_total']} healthy)"
     if reason == R_UNREACHABLE:
-        return "endpoint unreachable (connection failed or timed out)"
+        return f"endpoint unreachable while the network is healthy ({corroboration})"
     if reason == R_HTTP_ERROR:
-        return f"HTTP {obs['status']} returned, SLA requires 200"
+        return f"HTTP {obs['status']} returned, SLA requires 200 ({corroboration})"
     if reason == R_BAD_PAYLOAD:
-        return "eth_blockNumber returned an invalid or missing result"
-    if reason == R_HIGH_LATENCY:
-        return f"latency {obs['latency_ms']}ms exceeds limit {max_latency_ms}ms"
-    return f"block height frozen at {obs['block']}: node is not advancing"
+        return f"eth_blockNumber returned an invalid or missing result ({corroboration})"
+    return f"block {obs['block']} is more than {MAX_LAG_BLOCKS} behind reference head {obs['ref_head']} ({corroboration})"
+
+
+@allow_storage
+@dataclass
+class Endpoint:
+    """An authenticated, governor-listed provider endpoint. Immutable once
+    listed: only `status` ever changes (delisting)."""
+    endpoint_id: str
+    provider: str
+    domain: str  # registrable domain the endpoint must live under
+    url: str  # public, keyless JSON-RPC URL (probed verbatim)
+    host: str
+    apex: str  # registrable domain (eTLD+1): provider identity for exposure + independence
+    chain_id: u256
+    attestation: str  # sha256 commitment, see _attestation()
+    listed_at: u256
+    status: str
 
 
 @allow_storage
 @dataclass
 class Policy:
     holder: Address
-    endpoint_url: str
+    endpoint_id: str
+    endpoint_url: str  # snapshot of the registry listing (listings are immutable)
     host: str
-    apex: str  # registrable domain (eTLD+1): the unit of the per-host exposure cap
-    probe_mode: str
-    max_latency_ms: u256
+    apex: str  # registrable domain (eTLD+1): the unit of the per-provider exposure cap
+    chain_id: u256
     min_uptime_bps: u256
     probe_interval: u256  # seconds
     coverage: u256
@@ -411,31 +530,42 @@ class Policy:
     active_from: u256
     expires_at: u256
     status: str
-    # --- probe statistics (current measurement window) ---
+    # --- corroborated telemetry (current measurement window) ---
     window_started: u256
-    samples_total: u256
+    downtime_secs: u256  # sum of probe_interval over corroborated FAILING rounds
+    samples_total: u256  # corroborated rounds (HEALTHY + FAILING)
     samples_ok: u256
+    inconclusive_rounds: u256
     consecutive_failures: u256
-    baseline_ok: bool  # endpoint has been observed healthy at least once
+    outage_started_at: u256  # block-clock time of the first round of the current failing streak
+    outage_start_head: u256  # reference head at that round
+    last_ref_head: u256
+    baseline_ok: bool  # endpoint has been corroborated healthy at least once
     last_probe_at: u256
     last_block: u256
-    last_latency_ms: u256
     last_reason: str
     last_ok: bool
-    # --- staged claim ---
+    # --- staged claim and vesting ---
     settle_at: u256
     claim_count: u256
-    payout: u256
+    payout: u256  # confirmed payout (fixed at confirmation)
+    released: u256  # portion of `payout` already paid out
+    vest_start: u256
 
 
 class PulseSLA(gl.contract.Contract):
+    # Governance and the authenticated registry.
+    governor: Address
+    endpoints: TreeMap[str, Endpoint]
+    endpoint_ids: DynArray[str]
     # Underwriting pool (share-based accounting).
-    pool_assets: u256  # GEN owned by underwriters: deposits + premiums - payouts
+    pool_assets: u256  # GEN owned by underwriters: deposits + premiums - released payouts
     total_shares: u256
     shares: TreeMap[str, u256]  # underwriter hex -> shares
     # Exposure book.
-    locked_coverage: u256  # coverage of every live policy (ACTIVE + BREACH_PENDING)
-    reserved_payouts: u256  # subset of locked: coverage earmarked by confirmed breaches
+    locked_coverage: u256  # coverage of every live policy + unreleased confirmed payouts
+    reserved_payouts: u256  # subset of locked: staged claims (coverage) + owed_payouts
+    owed_payouts: u256  # subset of reserved: confirmed, not yet released
     host_exposure: TreeMap[str, u256]
     holder_exposure: TreeMap[str, u256]
     # Policies.
@@ -452,19 +582,21 @@ class PulseSLA(gl.contract.Contract):
     # Claim-velocity accounting (current epoch).
     velocity_epoch: u256
     velocity_paid: u256
-    velocity_base: u256  # pool assets when the epoch's first payout was made
+    velocity_base: u256  # pool assets when the epoch's first confirmation was made
     # Immutable protocol parameters (set at deploy).
     activation_delay: u256
     claim_grace: u256
     probe_bond: u256
-    # Append-only incident log: JSON strings (appended last to keep layout stable).
+    # Append-only incident log: JSON strings.
     incidents: DynArray[str]
 
     def __init__(self, activation_delay_secs: u256, claim_grace_secs: u256, probe_bond: u256):
+        self.governor = gl.message.sender_address
         self.pool_assets = 0
         self.total_shares = 0
         self.locked_coverage = 0
         self.reserved_payouts = 0
+        self.owed_payouts = 0
         self.next_policy_id = 1
         self.active_policies = 0
         self.annual_premium_run_rate = 0
@@ -486,6 +618,8 @@ class PulseSLA(gl.contract.Contract):
         assets = int(self.pool_assets)
         locked = int(self.locked_coverage)
         shares = int(self.total_shares)
+        reserved = int(self.reserved_payouts)
+        owed = int(self.owed_payouts)
         free = assets - locked if assets > locked else 0
         net = self._net_assets()
         epoch_paid, epoch_ceiling = self._velocity_window(self._now(), assets)
@@ -498,7 +632,9 @@ class PulseSLA(gl.contract.Contract):
             "epoch_ceiling": str(epoch_ceiling),
             "max_epoch_payout_bps": MAX_EPOCH_PAYOUT_BPS,
             "locked_coverage": str(locked),
-            "reserved_payouts": str(int(self.reserved_payouts)),
+            "reserved_payouts": str(reserved),
+            "owed_payouts": str(owed),
+            "staged_claims": str(reserved - owed if reserved > owed else 0),
             "free_liquidity": str(free),
             "utilization_bps": (locked * BPS // assets) if assets > 0 else 0,
             "apy_bps": (int(self.annual_premium_run_rate) * BPS // assets) if assets > 0 else 0,
@@ -512,7 +648,8 @@ class PulseSLA(gl.contract.Contract):
             "activation_delay": int(self.activation_delay),
             "claim_grace": int(self.claim_grace),
             "probe_bond": str(int(self.probe_bond)),
-            "solvent": locked <= assets and int(self.reserved_payouts) <= locked,
+            "listed_endpoints": len(self.endpoint_ids),
+            "solvent": locked <= assets and reserved <= locked and owed <= reserved,
         }
 
     @gl.public.view
@@ -529,6 +666,39 @@ class PulseSLA(gl.contract.Contract):
             "value": str(value),
             "withdrawable": str(value if value < free else free),
         }
+
+    @gl.public.view
+    def get_governor(self) -> str:
+        return _hex(self.governor)
+
+    @gl.public.view
+    def get_endpoint(self, endpoint_id: str) -> dict:
+        if endpoint_id not in self.endpoints:
+            raise gl.vm.UserError(f"{ERR_UNAUTH_ENDPOINT} endpoint is not in the authenticated registry")
+        return self._endpoint_dict(endpoint_id)
+
+    @gl.public.view
+    def list_endpoints(self, offset: u256, limit: u256) -> list:
+        out = []
+        i = int(offset)
+        n = len(self.endpoint_ids)
+        while i < n and len(out) < int(limit) and len(out) < 50:
+            out.append(self._endpoint_dict(self.endpoint_ids[i]))
+            i += 1
+        return out
+
+    @gl.public.view
+    def get_references(self, endpoint_id: str) -> list:
+        """The independent reference endpoints a round on `endpoint_id` is
+        corroborated against (same chain, different provider domain)."""
+        if endpoint_id not in self.endpoints:
+            raise gl.vm.UserError(f"{ERR_UNAUTH_ENDPOINT} endpoint is not in the authenticated registry")
+        ep = self.endpoints[endpoint_id]
+        return [rid for rid, _ in self._references(int(ep.chain_id), str(ep.apex))]
+
+    @gl.public.view
+    def compute_attestation(self, endpoint_id: str, provider: str, domain: str, chain_id: u256, url: str) -> str:
+        return _attestation(endpoint_id, provider, domain, int(chain_id), url)
 
     @gl.public.view
     def get_policy_count(self) -> int:
@@ -572,26 +742,117 @@ class PulseSLA(gl.contract.Contract):
     def whoami(self) -> str:
         return _hex(gl.message.sender_address)
 
+    # --------------------------------------------------------------- registry
+    @gl.public.write
+    def register_endpoint(
+        self,
+        endpoint_id: str,
+        provider: str,
+        domain: str,
+        chain_id: u256,
+        url: str,
+        attestation: str,
+    ) -> str:
+        """Governor-only. Lists a public provider endpoint as insurable (after
+        LISTING_DELAY_SECS) and as a reference for other providers' rounds.
+
+        Authentication is checked on-chain: the URL must be a public https
+        endpoint under the declared registrable domain, the commitment hash
+        must match, and a consensus `eth_chainId` call must return the declared
+        chain id. Listings are immutable; to change one, delist and re-list."""
+        self._only_governor()
+        if not _ID_RE.match(endpoint_id) or len(endpoint_id) > MAX_ID_LEN:
+            raise gl.vm.UserError(f"{ERR_REGISTRY} endpoint_id must be 2-32 chars of [a-z0-9-]")
+        if endpoint_id in self.endpoints:
+            raise gl.vm.UserError(f"{ERR_REGISTRY} endpoint_id already listed")
+        if len(self.endpoint_ids) >= MAX_ENDPOINTS:
+            raise gl.vm.UserError(f"{ERR_REGISTRY} registry is full")
+        if not (2 <= len(provider) <= MAX_PROVIDER_LEN) or not provider.isprintable() or "|" in provider:
+            raise gl.vm.UserError(f"{ERR_REGISTRY} provider name invalid")
+        chain = int(chain_id)
+        if not (1 <= chain <= MAX_CHAIN_ID):
+            raise gl.vm.UserError(f"{ERR_REGISTRY} chain_id out of range")
+        if not url.lower().startswith("https://") or not _is_safe_endpoint(url):
+            raise gl.vm.UserError(f"{ERR_REGISTRY} url must be a public https endpoint")
+        domain = domain.strip().lower()
+        host = _hostname(url)
+        if domain == "" or _apex(domain) != domain:
+            raise gl.vm.UserError(f"{ERR_REGISTRY} domain must be a registrable domain")
+        if host != domain and not host.endswith("." + domain):
+            raise gl.vm.UserError(f"{ERR_REGISTRY} url host is not under the declared provider domain")
+        for i in range(len(self.endpoint_ids)):
+            if str(self.endpoints[self.endpoint_ids[i]].url) == url:
+                raise gl.vm.UserError(f"{ERR_REGISTRY} url already listed")
+        if not _HASH_RE.match(attestation) or attestation != _attestation(endpoint_id, provider, domain, chain, url):
+            raise gl.vm.UserError(f"{ERR_REGISTRY} attestation hash does not match the listing")
+        if self._verify_chain_id(url) != chain:
+            raise gl.vm.UserError(f"{ERR_REGISTRY} endpoint did not authenticate as chain {chain}")
+
+        now = self._now()
+        self.endpoints[endpoint_id] = Endpoint(
+            endpoint_id=endpoint_id,
+            provider=provider,
+            domain=domain,
+            url=url,
+            host=host,
+            apex=_apex(host),
+            chain_id=chain,
+            attestation=attestation,
+            listed_at=now,
+            status=EP_LISTED,
+        )
+        self.endpoint_ids.append(endpoint_id)
+        self._log(0, "ENDPOINT_LISTED", f"{endpoint_id}: {provider} ({domain}), chain {chain}, insurable from {now + LISTING_DELAY_SECS}")
+        return endpoint_id
+
+    @gl.public.write
+    def delist_endpoint(self, endpoint_id: str) -> str:
+        """Governor-only. Stops new policies on the endpoint and removes it from
+        the reference set. Policies already written keep running against the
+        immutable listing snapshot."""
+        self._only_governor()
+        if endpoint_id not in self.endpoints:
+            raise gl.vm.UserError(f"{ERR_UNAUTH_ENDPOINT} endpoint is not in the authenticated registry")
+        ep = self.endpoints[endpoint_id]
+        if ep.status != EP_LISTED:
+            raise gl.vm.UserError(f"{ERR_STATE} endpoint already delisted")
+        ep.status = EP_DELISTED
+        self._log(0, "ENDPOINT_DELISTED", endpoint_id)
+        return EP_DELISTED
+
+    @gl.public.write
+    def transfer_governor(self, new_governor_hex: str) -> str:
+        self._only_governor()
+        new_governor = Address(new_governor_hex)
+        if new_governor == self.governor:
+            raise gl.vm.UserError(f"{ERR_PARAMS} already the governor")
+        self.governor = new_governor
+        self._log(0, "GOVERNOR_CHANGED", _hex(new_governor))
+        return _hex(new_governor)
+
     # ------------------------------------------------------------ underwriting
     @gl.public.write.payable
     def deposit_underwriting(self) -> str:
         amount = int(gl.message.value)
         if amount < MIN_DEPOSIT:
             raise gl.vm.UserError(f"{ERR_PARAMS} deposit below minimum")
-        # Deposits are frozen while any claim is reserved. Pricing them on net assets
-        # would let someone stage a breach, buy discounted shares, and profit when
-        # the claim is dismissed; pricing on gross would instead dilute the LPs who
-        # carry the pending risk. Freezing removes the window entirely.
-        if int(self.reserved_payouts) > 0:
+        # Deposits are frozen while any claim is STAGED (uncertain). Pricing them
+        # on net assets would let someone stage a breach, buy discounted shares,
+        # and profit when the claim is dismissed; pricing on gross would dilute
+        # the LPs who carry the pending risk. Confirmed payouts that are merely
+        # vesting are certain liabilities: they are already excluded from net
+        # assets, so they do not freeze deposits.
+        if self._staged_reserved() > 0:
             raise gl.vm.UserError(f"{ERR_DEPOSITS_FROZEN} a staged claim is reserved; deposits reopen when it settles")
-        assets = int(self.pool_assets)  # gross assets (== net, since nothing is reserved)
+        assets = int(self.pool_assets)
+        net = self._net_assets()
         total = int(self.total_shares)
         if total == 0:
             minted = amount
         else:
-            if assets == 0:
+            if net == 0:
                 raise gl.vm.UserError(f"{ERR_STATE} pool has no assets; deposits closed")
-            minted = amount * total // assets
+            minted = amount * total // net
         if minted == 0:
             raise gl.vm.UserError(f"{ERR_PARAMS} deposit too small for current share price")
         who = _hex(gl.message.sender_address)
@@ -609,7 +870,7 @@ class PulseSLA(gl.contract.Contract):
         who = _hex(gl.message.sender_address)
         held = int(self.shares[who]) if who in self.shares else 0
         assets = int(self.pool_assets)
-        net = self._net_assets()  # assets minus capital reserved for staged claims
+        net = self._net_assets()  # assets minus capital reserved for staged claims and owed payouts
         total = int(self.total_shares)
         if held == 0 or total == 0 or net == 0:
             raise gl.vm.UserError(f"{ERR_LIQUIDITY} no redeemable underwriting position")
@@ -637,23 +898,32 @@ class PulseSLA(gl.contract.Contract):
     @gl.public.write.payable
     def create_policy(
         self,
-        endpoint_url: str,
-        max_latency_ms: u256,
+        endpoint_id: str,
         coverage_amount: u256,
         duration_blocks: u256,
         min_uptime_bps: u256,
         probe_interval_blocks: u256,
-        probe_mode: str,
     ) -> u256:
-        if not _is_safe_endpoint(endpoint_url):
-            raise gl.vm.UserError(f"{ERR_PARAMS} endpoint URL rejected (must be a public http(s) host)")
-        lat = int(max_latency_ms)
+        """Buy cover on a REGISTERED endpoint. There is no URL input: the
+        probed endpoint is the immutable registry listing."""
+        if endpoint_id not in self.endpoints:
+            raise gl.vm.UserError(f"{ERR_UNAUTH_ENDPOINT} endpoint is not in the authenticated registry")
+        ep = self.endpoints[endpoint_id]
+        now = self._now()
+        if ep.status != EP_LISTED:
+            raise gl.vm.UserError(f"{ERR_UNAUTH_ENDPOINT} endpoint has been delisted")
+        if now < int(ep.listed_at) + LISTING_DELAY_SECS:
+            raise gl.vm.UserError(f"{ERR_UNAUTH_ENDPOINT} listing delay has not elapsed")
+        if len(self._references(int(ep.chain_id), str(ep.apex))) < MIN_REFERENCES:
+            raise gl.vm.UserError(f"{ERR_UNAUTH_ENDPOINT} fewer than {MIN_REFERENCES} independent reference providers on this chain")
+        holder = gl.message.sender_address
+        if holder == self.governor:
+            raise gl.vm.UserError(f"{ERR_UNAUTHORIZED} the registry governor cannot hold policies")
+
         cov = int(coverage_amount)
         dur = int(duration_blocks)
         up = int(min_uptime_bps)
         interval = int(probe_interval_blocks)
-        if not (MIN_LATENCY_MS <= lat <= MAX_LATENCY_MS):
-            raise gl.vm.UserError(f"{ERR_PARAMS} max_latency_ms out of range")
         if cov < MIN_COVERAGE:
             raise gl.vm.UserError(f"{ERR_PARAMS} coverage below minimum")
         if not (MIN_DURATION_BLOCKS <= dur <= MAX_DURATION_BLOCKS):
@@ -662,8 +932,6 @@ class PulseSLA(gl.contract.Contract):
             raise gl.vm.UserError(f"{ERR_PARAMS} min_uptime_bps out of range")
         if not (MIN_INTERVAL_BLOCKS <= interval <= MAX_INTERVAL_BLOCKS):
             raise gl.vm.UserError(f"{ERR_PARAMS} probe interval out of range")
-        if probe_mode not in VALID_MODES:
-            raise gl.vm.UserError(f"{ERR_PARAMS} probe_mode must be rpc or http")
 
         premium = _premium_for(cov, dur, up)
         paid = int(gl.message.value)
@@ -672,9 +940,7 @@ class PulseSLA(gl.contract.Contract):
 
         assets = int(self.pool_assets)
         locked = int(self.locked_coverage)
-        host = _hostname(endpoint_url)
-        apex = _apex(host)
-        holder = gl.message.sender_address
+        apex = str(ep.apex)
         holder_hex = _hex(holder)
         host_now = int(self.host_exposure[apex]) if apex in self.host_exposure else 0
         holder_now = int(self.holder_exposure[holder_hex]) if holder_hex in self.holder_exposure else 0
@@ -683,43 +949,49 @@ class PulseSLA(gl.contract.Contract):
         if locked + cov > assets * MAX_UTILIZATION_BPS // BPS:
             raise gl.vm.UserError(f"{ERR_CAP} pool utilization cap reached")
         if host_now + cov > assets * MAX_HOST_BPS // BPS:
-            raise gl.vm.UserError(f"{ERR_CAP} per-endpoint (registrable domain) exposure cap reached")
+            raise gl.vm.UserError(f"{ERR_CAP} per-provider (registrable domain) exposure cap reached")
         if holder_now + cov > assets * MAX_HOLDER_BPS // BPS:
             raise gl.vm.UserError(f"{ERR_CAP} per-holder exposure cap reached")
 
-        now = self._now()
         duration_secs = dur * BLOCK_SECONDS
+        active_from = now + int(self.activation_delay)
         pid = int(self.next_policy_id)
         self.next_policy_id = pid + 1
         self.policies[pid] = Policy(
             holder=holder,
-            endpoint_url=endpoint_url,
-            host=host,
+            endpoint_id=endpoint_id,
+            endpoint_url=str(ep.url),
+            host=str(ep.host),
             apex=apex,
-            probe_mode=probe_mode,
-            max_latency_ms=lat,
+            chain_id=int(ep.chain_id),
             min_uptime_bps=up,
             probe_interval=interval * BLOCK_SECONDS,
             coverage=cov,
             premium=premium,
             duration_secs=duration_secs,
             created_at=now,
-            active_from=now + int(self.activation_delay),
-            expires_at=now + int(self.activation_delay) + duration_secs,
+            active_from=active_from,
+            expires_at=active_from + duration_secs,
             status=ST_ACTIVE,
-            window_started=0,
+            window_started=active_from,
+            downtime_secs=0,
             samples_total=0,
             samples_ok=0,
+            inconclusive_rounds=0,
             consecutive_failures=0,
+            outage_started_at=0,
+            outage_start_head=0,
+            last_ref_head=0,
             baseline_ok=False,
             last_probe_at=0,
             last_block=0,
-            last_latency_ms=0,
             last_reason="",
             last_ok=False,
             settle_at=0,
             claim_count=0,
             payout=0,
+            released=0,
+            vest_start=0,
         )
         # effects
         self.locked_coverage = locked + cov
@@ -729,7 +1001,7 @@ class PulseSLA(gl.contract.Contract):
         self.annual_premium_run_rate = int(self.annual_premium_run_rate) + premium * YEAR_SECS // duration_secs
         self.pool_assets = assets + premium
         self.total_premiums = int(self.total_premiums) + premium
-        self._log(pid, "POLICY_CREATED", f"coverage {cov}, premium {premium}, {up} bps uptime, {lat}ms limit")
+        self._log(pid, "POLICY_CREATED", f"{endpoint_id}: coverage {cov}, premium {premium}, {up} bps uptime")
         # interaction: refund any overpayment
         self._pay(holder, paid - premium)
         return pid
@@ -753,8 +1025,10 @@ class PulseSLA(gl.contract.Contract):
     # ----------------------------------------------------------------- probes
     @gl.public.write.payable
     def trigger_probe(self, policy_id: u256) -> dict:
-        """Permissionless health probe. Requires a spam bond: refunded when the
-        probe finds a failure, forfeited to underwriters when it finds none."""
+        """Permissionless corroborated health round. Requires a spam bond:
+        refunded when the round finds a corroborated failure or cannot be
+        corroborated, forfeited to underwriters when it finds the endpoint
+        healthy."""
         p = self._get(policy_id)
         if p.status != ST_ACTIVE:
             raise gl.vm.UserError(f"{ERR_STATE} policy is not ACTIVE")
@@ -769,57 +1043,72 @@ class PulseSLA(gl.contract.Contract):
         if bond < int(self.probe_bond):
             raise gl.vm.UserError(f"{ERR_EXPECTED} probe bond {int(self.probe_bond)} required")
 
-        obs = self._consensus_probe(p, now)
+        obs = self._consensus_round(p)
+        verdict = str(obs["verdict"])
 
-        # --- measurement window rollover ---
-        if int(p.window_started) == 0 or now - int(p.window_started) >= MEASUREMENT_WINDOW:
-            p.window_started = now
+        # --- measurement window rollover (aligned to the policy's own clock) ---
+        if now - int(p.window_started) >= MEASUREMENT_WINDOW:
+            age = now - int(p.active_from)
+            p.window_started = int(p.active_from) + (age // MEASUREMENT_WINDOW) * MEASUREMENT_WINDOW
+            p.downtime_secs = 0
             p.samples_total = 0
             p.samples_ok = 0
-        p.samples_total = int(p.samples_total) + 1
         self.total_probes = int(self.total_probes) + 1
         p.last_probe_at = now
-        p.last_latency_ms = max(0, int(obs["latency_ms"]))
         p.last_reason = str(obs["reason"])
-        p.last_ok = bool(obs["ok"])
-        if obs["ok"]:
-            p.samples_ok = int(p.samples_ok) + 1
-            p.consecutive_failures = 0
-            p.baseline_ok = True
-        else:
-            p.consecutive_failures = int(p.consecutive_failures) + 1
-        if int(obs["block"]) > 0 and obs["reason"] in (R_OK, R_HIGH_LATENCY):
+        p.last_ok = verdict == V_HEALTHY
+        if int(obs["block"]) > 0:
             p.last_block = int(obs["block"])
 
-        text = _describe(obs, int(p.max_latency_ms))
-        self._log(policy_id, "PROBE", text, obs)
-
-        # --- bond settlement + breach staging ---
         forfeit = 0
-        if obs["ok"]:
-            forfeit = int(self.probe_bond)
-            self.pool_assets = int(self.pool_assets) + forfeit
-            self.total_bond_forfeits = int(self.total_bond_forfeits) + forfeit
-        staged = self._maybe_stage_breach(policy_id, p, now)
-        refund = bond - forfeit
-        self._pay(gl.message.sender_address, refund)
+        staged = False
+        if verdict == V_INCONCLUSIVE:
+            # No baseline: neither a failure nor a recovery. Streak, downtime and
+            # baseline are untouched and the bond is returned in full.
+            p.inconclusive_rounds = int(p.inconclusive_rounds) + 1
+        else:
+            p.samples_total = int(p.samples_total) + 1
+            p.last_ref_head = int(obs["ref_head"])
+            if verdict == V_HEALTHY:
+                p.samples_ok = int(p.samples_ok) + 1
+                p.consecutive_failures = 0
+                p.outage_started_at = 0
+                p.outage_start_head = 0
+                p.baseline_ok = True
+                forfeit = int(self.probe_bond)
+                self.pool_assets = int(self.pool_assets) + forfeit
+                self.total_bond_forfeits = int(self.total_bond_forfeits) + forfeit
+            else:
+                if int(p.consecutive_failures) == 0:
+                    p.outage_started_at = now
+                    p.outage_start_head = int(obs["ref_head"])
+                p.consecutive_failures = int(p.consecutive_failures) + 1
+                p.downtime_secs = int(p.downtime_secs) + int(p.probe_interval)
+            staged = self._maybe_stage_breach(policy_id, p, now, int(obs["ref_head"]))
+        self._log(policy_id, "PROBE", _describe(obs), obs)
+        self._pay(gl.message.sender_address, bond - forfeit)
 
         return {
-            "ok": bool(obs["ok"]),
+            "ok": verdict == V_HEALTHY,
+            "verdict": verdict,
             "reason": str(obs["reason"]),
             "status": int(obs["status"]),
-            "latency_ms": int(obs["latency_ms"]),
             "block": int(obs["block"]),
+            "ref_head": int(obs["ref_head"]),
+            "refs_ok": int(obs["refs_ok"]),
+            "refs_total": int(obs["refs_total"]),
             "breach_staged": staged,
             "consecutive_failures": int(p.consecutive_failures),
-            "uptime_bps": self._uptime_bps(p),
+            "uptime_bps": self._uptime_bps(p, now),
         }
 
     @gl.public.write.payable
     def settle_claim(self, policy_id: u256) -> dict:
         """Re-verifies a staged breach after the grace period with a fresh
-        consensus probe. Pays the HOLDER iff the endpoint is still failing;
-        otherwise dismisses the claim and the policy resumes."""
+        corroborated round. If the endpoint is still FAILING the breach is
+        CONFIRMED and the payout starts vesting (see `release_payout`); if it
+        is HEALTHY the claim is dismissed and the policy resumes; an
+        INCONCLUSIVE round changes nothing."""
         p = self._get(policy_id)
         if p.status != ST_BREACH_PENDING:
             raise gl.vm.UserError(f"{ERR_STATE} no staged claim on this policy")
@@ -832,20 +1121,23 @@ class PulseSLA(gl.contract.Contract):
         if bond < int(self.probe_bond):
             raise gl.vm.UserError(f"{ERR_EXPECTED} probe bond {int(self.probe_bond)} required")
 
-        obs = self._consensus_probe(p, now)
-        text = _describe(obs, int(p.max_latency_ms))
+        obs = self._consensus_round(p)
+        verdict = str(obs["verdict"])
+        if verdict == V_INCONCLUSIVE:
+            raise gl.vm.UserError(f"{ERR_INCONCLUSIVE} re-verification could not be corroborated; retry")
+        text = _describe(obs)
         coverage = int(p.coverage)
 
-        if not obs["ok"]:
+        if verdict == V_FAILING:
             payout = _vested_payout(coverage, now - int(p.active_from))
             assets = int(self.pool_assets)
             if payout > assets:
                 payout = assets  # bounded: can never exceed pool depth
-            # Claim velocity ceiling: a wave of breaches is paid across epochs. The
-            # claim stays staged (and the whole call reverts, refunding the bond)
-            # until the next epoch has room; the 14-day settlement window outlasts the queue.
-            # The first payout of an epoch is always allowed (progress guarantee): the
-            # ceiling shrinks with the pool and could otherwise fall below one claim.
+            # Claim velocity ceiling: a wave of breaches is confirmed across
+            # epochs. The claim stays staged (and the whole call reverts,
+            # refunding the bond) until the next epoch has room; the 14-day
+            # settlement window outlasts the queue. The first confirmation of an
+            # epoch is always allowed (progress guarantee).
             paid_now, ceiling = self._velocity_window(now, assets)
             if paid_now > 0 and paid_now + payout > ceiling:
                 raise gl.vm.UserError(f"{ERR_VELOCITY} epoch payout ceiling reached; retry next epoch")
@@ -856,24 +1148,24 @@ class PulseSLA(gl.contract.Contract):
                 self.velocity_paid = 0
             self.velocity_paid = int(self.velocity_paid) + payout
             self.total_probes = int(self.total_probes) + 1
-            holder = p.holder
             p.payout = payout
+            p.released = 0
+            p.vest_start = now
             p.last_reason = str(obs["reason"])
             p.last_ok = False
             p.last_probe_at = now
-            p.last_latency_ms = max(0, int(obs["latency_ms"]))
-            self._close(policy_id, ST_PAID)  # releases lock + reservation
-            self.pool_assets = assets - payout
-            self.total_payouts = int(self.total_payouts) + payout
+            self._begin_vesting(policy_id, payout)
             self._log(
                 policy_id,
-                "PAYOUT",
-                f"re-verification confirmed breach ({text}); paid {payout} of {coverage} coverage",
+                "BREACH_CONFIRMED_VESTING",
+                f"re-verification confirmed breach ({text}); {payout} of {coverage} coverage vests "
+                f"after a {PAYOUT_COOLDOWN_SECS}s cooldown over {PAYOUT_VEST_SECS}s",
                 obs,
             )
-            self._pay(holder, payout)
             self._pay(gl.message.sender_address, bond)
-            return {"paid": True, "payout": str(payout), "reason": str(obs["reason"])}
+            return {"confirmed": True, "payout": str(payout), "reason": str(obs["reason"]),
+                    "vest_start": now, "releasable_from": now + PAYOUT_COOLDOWN_SECS,
+                    "fully_vested_at": now + PAYOUT_COOLDOWN_SECS + PAYOUT_VEST_SECS}
 
         # Endpoint recovered during the grace period: dismiss, resume cover.
         self.total_probes = int(self.total_probes) + 1
@@ -883,35 +1175,113 @@ class PulseSLA(gl.contract.Contract):
         self.reserved_payouts = int(self.reserved_payouts) - coverage
         p.status = ST_ACTIVE
         p.consecutive_failures = 0
+        p.outage_started_at = 0
+        p.outage_start_head = 0
         p.last_ok = True
         p.last_reason = R_OK
         p.last_probe_at = now
-        p.last_latency_ms = max(0, int(obs["latency_ms"]))
         if int(obs["block"]) > 0:
             p.last_block = int(obs["block"])
         self._log(policy_id, "CLAIM_DISMISSED", f"endpoint recovered during grace period ({text})", obs)
         self._pay(gl.message.sender_address, bond - forfeit)
-        return {"paid": False, "payout": "0", "reason": R_OK}
+        return {"confirmed": False, "payout": "0", "reason": R_OK}
+
+    @gl.public.write
+    def release_payout(self, policy_id: u256) -> dict:
+        """Permissionless. Pays the HOLDER the portion of a confirmed payout
+        that has vested: nothing during the cooldown, then linearly."""
+        p = self._get(policy_id)
+        if p.status != ST_VESTING:
+            raise gl.vm.UserError(f"{ERR_STATE} policy has no vesting payout")
+        now = self._now()
+        payout = int(p.payout)
+        released = int(p.released)
+        due = _releasable(payout, int(p.vest_start), now) - released
+        if due <= 0:
+            raise gl.vm.UserError(f"{ERR_TOO_SOON} nothing has vested yet")
+        holder = p.holder
+        p.released = released + due
+        self.owed_payouts = int(self.owed_payouts) - due
+        self.reserved_payouts = int(self.reserved_payouts) - due
+        self.locked_coverage = int(self.locked_coverage) - due
+        self.pool_assets = int(self.pool_assets) - due
+        self.total_payouts = int(self.total_payouts) + due
+        done = released + due >= payout
+        if done:
+            p.status = ST_PAID
+        self._log(policy_id, "PAYOUT_RELEASED", f"released {due} ({released + due} of {payout})")
+        self._pay(holder, due)
+        return {"released": str(due), "total_released": str(released + due), "payout": str(payout), "done": done}
 
     # ---------------------------------------------------------------- internal
-    def _consensus_probe(self, p: Policy, now: int) -> dict:
-        url = str(p.endpoint_url)
-        mode = str(p.probe_mode)
-        max_latency = int(p.max_latency_ms)
-        last_block = int(p.last_block)
-        elapsed = now - int(p.last_probe_at) if int(p.last_probe_at) > 0 else 0
+    def _only_governor(self) -> None:
+        if gl.message.sender_address != self.governor:
+            raise gl.vm.UserError(f"{ERR_UNAUTHORIZED} only the registry governor may do this")
 
-        def leader() -> dict:
-            return _measure(url, mode, max_latency, last_block, elapsed)
+    def _references(self, chain_id: int, apex: str) -> list:
+        """Deterministic reference set for a chain: the first MAX_REFERENCES
+        LISTED endpoints, in listing order, on the same chain and from distinct
+        providers other than the insured one. A listing only becomes a
+        reference after the same listing delay that gates insurability, so a
+        just-listed (possibly hostile) endpoint cannot sway a round.
+        Returns [(id, url)]."""
+        out = []
+        seen = {apex}
+        now = self._now()
+        for i in range(len(self.endpoint_ids)):
+            if len(out) >= MAX_REFERENCES:
+                break
+            ep = self.endpoints[self.endpoint_ids[i]]
+            if ep.status != EP_LISTED or int(ep.chain_id) != chain_id:
+                continue
+            if now < int(ep.listed_at) + LISTING_DELAY_SECS:
+                continue
+            ep_apex = str(ep.apex)
+            if ep_apex in seen:
+                continue
+            seen.add(ep_apex)
+            out.append((str(ep.endpoint_id), str(ep.url)))
+        return out
+
+    def _verify_chain_id(self, url: str) -> int:
+        """Consensus `eth_chainId`: the leader and every validator must read the
+        same chain id from the endpoint."""
+
+        def leader() -> int:
+            _, _, chain = _rpc_call(url, "eth_chainId")
+            return chain
 
         def validator(leaders_res: gl.vm.Result) -> bool:
-            return _verdicts_agree(leaders_res, leader, max_latency, mode == MODE_RPC)
+            if not isinstance(leaders_res, gl.vm.Return):
+                return False
+            got = leaders_res.calldata
+            if not isinstance(got, int) or isinstance(got, bool) or got <= 0:
+                return False
+            return got == leader()
 
         return gl.vm.run_nondet(leader, validator)
 
+    def _consensus_round(self, p: Policy) -> dict:
+        url = str(p.endpoint_url)
+        refs = self._references(int(p.chain_id), str(p.apex))
+        expected_ids = [rid for rid, _ in refs]
+
+        def leader() -> dict:
+            return _round(url, refs)
+
+        def validator(leaders_res: gl.vm.Result) -> bool:
+            return _round_agrees(leaders_res, leader, expected_ids)
+
+        return gl.vm.run_nondet(leader, validator)
+
+    def _staged_reserved(self) -> int:
+        reserved = int(self.reserved_payouts)
+        owed = int(self.owed_payouts)
+        return reserved - owed if reserved > owed else 0
+
     def _net_assets(self) -> int:
-        """Pool assets net of capital reserved for staged claims: the basis for
-        share pricing and redemptions."""
+        """Pool assets net of capital reserved for staged claims and confirmed,
+        unreleased payouts: the basis for share pricing and redemptions."""
         assets = int(self.pool_assets)
         reserved = int(self.reserved_payouts)
         return assets - reserved if assets > reserved else 0
@@ -923,16 +1293,30 @@ class PulseSLA(gl.contract.Contract):
             return int(self.velocity_paid), int(self.velocity_base) * MAX_EPOCH_PAYOUT_BPS // BPS
         return 0, assets * MAX_EPOCH_PAYOUT_BPS // BPS
 
-    def _uptime_bps(self, p: Policy) -> int:
-        total = int(p.samples_total)
-        if total == 0:
-            return BPS
-        return int(p.samples_ok) * BPS // total
+    def _uptime_bps(self, p: Policy, now: int) -> int:
+        """Time-weighted uptime: each corroborated failing round counts one
+        probe interval of downtime, against the elapsed window floored at
+        MIN_UPTIME_WINDOW. Unprobed time counts as up (conservative for
+        underwriters), and probing only during a failure cannot shrink the
+        denominator, so the ratio does not depend on WHEN anyone chose to probe."""
+        started = int(p.window_started)
+        if now - started >= MEASUREMENT_WINDOW:
+            return BPS  # a fresh window has recorded no downtime yet
+        span = now - started
+        if span < MIN_UPTIME_WINDOW:
+            span = MIN_UPTIME_WINDOW
+        down = int(p.downtime_secs) * BPS // span
+        return BPS - down if down < BPS else 0
 
-    def _maybe_stage_breach(self, pid: int, p: Policy, now: int) -> bool:
+    def _maybe_stage_breach(self, pid: int, p: Policy, now: int, ref_head: int) -> bool:
         if int(p.consecutive_failures) < BREACH_CONSECUTIVE or not p.baseline_ok:
             return False
-        if self._uptime_bps(p) >= int(p.min_uptime_bps):
+        started = int(p.outage_started_at)
+        if started == 0 or now - started < MIN_OUTAGE_SECS:
+            return False  # outage must persist across real elapsed time
+        if ref_head - int(p.outage_start_head) < MIN_OUTAGE_BLOCKS:
+            return False  # ...and across real chain progress observed by the references
+        if self._uptime_bps(p, now) >= int(p.min_uptime_bps):
             return False
         p.status = ST_BREACH_PENDING
         p.settle_at = now + int(self.claim_grace)
@@ -941,11 +1325,19 @@ class PulseSLA(gl.contract.Contract):
         self.total_breaches = int(self.total_breaches) + 1
         self._log(
             pid,
-            "BREACH_CONFIRMED",
-            f"{int(p.consecutive_failures)} consecutive failures; uptime {self._uptime_bps(p)} bps "
+            "BREACH_STAGED",
+            f"{int(p.consecutive_failures)} corroborated failing rounds over {now - started}s and "
+            f"{ref_head - int(p.outage_start_head)} blocks; uptime {self._uptime_bps(p, now)} bps "
             f"< {int(p.min_uptime_bps)} bps SLA; payout reserved, grace until {int(p.settle_at)}",
         )
         return True
+
+    def _release_exposure(self, p: Policy, cov: int) -> None:
+        self.host_exposure[str(p.apex)] = int(self.host_exposure[str(p.apex)]) - cov
+        holder_hex = _hex(p.holder)
+        self.holder_exposure[holder_hex] = int(self.holder_exposure[holder_hex]) - cov
+        self.active_policies = int(self.active_policies) - 1
+        self.annual_premium_run_rate = int(self.annual_premium_run_rate) - int(p.premium) * YEAR_SECS // int(p.duration_secs)
 
     def _close(self, pid: int, status: str) -> None:
         """Move a live policy to a terminal state and release all its exposure."""
@@ -954,12 +1346,20 @@ class PulseSLA(gl.contract.Contract):
         if p.status == ST_BREACH_PENDING:
             self.reserved_payouts = int(self.reserved_payouts) - cov
         self.locked_coverage = int(self.locked_coverage) - cov
-        self.host_exposure[str(p.apex)] = int(self.host_exposure[str(p.apex)]) - cov
-        holder_hex = _hex(p.holder)
-        self.holder_exposure[holder_hex] = int(self.holder_exposure[holder_hex]) - cov
-        self.active_policies = int(self.active_policies) - 1
-        self.annual_premium_run_rate = int(self.annual_premium_run_rate) - int(p.premium) * YEAR_SECS // int(p.duration_secs)
+        self._release_exposure(p, cov)
         p.status = status
+
+    def _begin_vesting(self, pid: int, payout: int) -> None:
+        """Breach confirmed: the policy stops insuring (exposure released), the
+        un-paid slice of coverage returns to the pool, and the payout is parked
+        as a certain, reserved liability until `release_payout` streams it out."""
+        p = self.policies[pid]
+        cov = int(p.coverage)
+        self.reserved_payouts = int(self.reserved_payouts) - cov + payout
+        self.owed_payouts = int(self.owed_payouts) + payout
+        self.locked_coverage = int(self.locked_coverage) - cov + payout
+        self._release_exposure(p, cov)
+        p.status = ST_VESTING
 
     def _get(self, policy_id: int) -> Policy:
         if policy_id not in self.policies:
@@ -980,23 +1380,51 @@ class PulseSLA(gl.contract.Contract):
             "by": _hex(gl.message.sender_address),
         }
         if obs is not None:
-            rec["ok"] = bool(obs["ok"])
+            rec["verdict"] = str(obs["verdict"])
+            rec["ok"] = str(obs["verdict"]) == V_HEALTHY
             rec["reason"] = str(obs["reason"])
             rec["status"] = int(obs["status"])
-            rec["latency_ms"] = int(obs["latency_ms"])
             rec["block"] = int(obs["block"])
+            rec["ref_head"] = int(obs["ref_head"])
+            rec["refs_ok"] = int(obs["refs_ok"])
+            rec["refs_total"] = int(obs["refs_total"])
         self.incidents.append(json.dumps(rec, sort_keys=True))
+
+    def _endpoint_dict(self, endpoint_id: str) -> dict:
+        ep = self.endpoints[endpoint_id]
+        listed_at = int(ep.listed_at)
+        return {
+            "endpoint_id": str(ep.endpoint_id),
+            "provider": str(ep.provider),
+            "domain": str(ep.domain),
+            "url": str(ep.url),
+            "host": str(ep.host),
+            "apex": str(ep.apex),
+            "chain_id": int(ep.chain_id),
+            "attestation": str(ep.attestation),
+            "listed_at": listed_at,
+            "insurable_from": listed_at + LISTING_DELAY_SECS,
+            "status": str(ep.status),
+        }
 
     def _policy_dict(self, pid: int) -> dict:
         p = self.policies[pid]
+        now = self._now()
+        outage_blocks = 0
+        if int(p.outage_started_at) > 0 and int(p.last_ref_head) > int(p.outage_start_head):
+            outage_blocks = int(p.last_ref_head) - int(p.outage_start_head)
+        payout = int(p.payout)
+        releasable = 0
+        if p.status == ST_VESTING:
+            releasable = _releasable(payout, int(p.vest_start), now) - int(p.released)
         return {
             "id": int(pid),
             "holder": _hex(p.holder),
+            "endpoint_id": str(p.endpoint_id),
             "endpoint_url": str(p.endpoint_url),
             "host": str(p.host),
             "apex": str(p.apex),
-            "probe_mode": str(p.probe_mode),
-            "max_latency_ms": int(p.max_latency_ms),
+            "chain_id": int(p.chain_id),
             "min_uptime_bps": int(p.min_uptime_bps),
             "probe_interval": int(p.probe_interval),
             "coverage": str(int(p.coverage)),
@@ -1007,17 +1435,24 @@ class PulseSLA(gl.contract.Contract):
             "status": str(p.status),
             "samples_total": int(p.samples_total),
             "samples_ok": int(p.samples_ok),
-            "uptime_bps": self._uptime_bps(p),
+            "inconclusive_rounds": int(p.inconclusive_rounds),
+            "downtime_secs": int(p.downtime_secs),
+            "uptime_bps": self._uptime_bps(p, now),
             "consecutive_failures": int(p.consecutive_failures),
+            "outage_started_at": int(p.outage_started_at),
+            "outage_blocks": outage_blocks,
             "baseline_ok": bool(p.baseline_ok),
             "last_probe_at": int(p.last_probe_at),
             "last_block": int(p.last_block),
-            "last_latency_ms": int(p.last_latency_ms),
+            "last_ref_head": int(p.last_ref_head),
             "last_reason": str(p.last_reason),
             "last_ok": bool(p.last_ok),
             "settle_at": int(p.settle_at),
             "claim_count": int(p.claim_count),
-            "payout": str(int(p.payout)),
+            "payout": str(payout),
+            "released": str(int(p.released)),
+            "releasable": str(releasable if releasable > 0 else 0),
+            "vest_start": int(p.vest_start),
         }
 
     def _now(self) -> int:

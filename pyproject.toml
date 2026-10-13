@@ -1,2 +1,3 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore:Web mock never matched:RuntimeWarning"]

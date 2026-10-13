@@ -59,11 +59,13 @@ def abi_from_schema(schema: dict) -> list[dict]:
     return methods
 
 
-def load_account(path: Path | None = None, create: bool = True):
-    """Deployer key: $PULSESLA_PRIVATE_KEY, else .keys/deployer.key.json (0600)."""
+def load_account(path: Path | None = None, create: bool = True, env_var: str = "PULSESLA_PRIVATE_KEY"):
+    """Deployer key: $PULSESLA_PRIVATE_KEY, else .keys/deployer.key.json (0600).
+    The deployer is the registry governor and may not hold policies; pass a
+    different `env_var` / `path` for a policyholder key."""
     from genlayer_py import create_account
 
-    env_key = os.environ.get("PULSESLA_PRIVATE_KEY")
+    env_key = os.environ.get(env_var)
     if env_key:
         return create_account(env_key if env_key.startswith("0x") else "0x" + env_key)
     path = path or KEY_DIR / "deployer.key.json"
