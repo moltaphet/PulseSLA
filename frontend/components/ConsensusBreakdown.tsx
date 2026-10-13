@@ -1,7 +1,7 @@
 import type { ConsensusVote } from "@/lib/types";
 import { Pill } from "./ui";
 
-/** Roll call of the validator round: who agreed with the leader's verdict, and what each one saw. */
+/** Roll call of the validator round: who agreed with the leader's corroborated verdict, and what each one saw. */
 export function ConsensusBreakdown({ votes, emptyNote }: { votes?: ConsensusVote[]; emptyNote?: string }) {
   if (!votes || votes.length === 0) {
     return <p className="text-sm text-muted">{emptyNote ?? "No vote roll recorded for this observation. The contract stores the leader's view; the full roll is in the transaction's consensus data."}</p>;
@@ -26,7 +26,7 @@ export function ConsensusBreakdown({ votes, emptyNote }: { votes?: ConsensusVote
             </span>
             <span className="num text-right text-xs text-muted">
               {v.reason !== undefined
-                ? `${(v.reason ?? "").toLowerCase().replace(/_/g, " ")}${v.status ? ` · HTTP ${v.status}` : ""}${v.latencyMs !== undefined ? ` · ${v.latencyMs} ms` : ""}`
+                ? `${(v.verdict ?? v.reason ?? "").toLowerCase().replace(/_/g, " ")}${v.reason && v.reason !== "OK" ? ` · ${v.reason.toLowerCase().replace(/_/g, " ")}` : ""}${v.status ? ` · HTTP ${v.status}` : ""}${v.refsOk !== undefined ? ` · ${v.refsOk} refs ok` : ""}`
                 : v.agree ? "agrees" : "disagrees"}
             </span>
             <span className="sr-only">{v.agree ? "agrees" : "disagrees"}</span>

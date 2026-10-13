@@ -2,19 +2,19 @@
 
 import { useMemo, useState } from "react";
 import { useProtocol } from "@/lib/hooks/useProtocol";
-import { SETTLE_WINDOW_SECONDS } from "@/lib/pricing";
-import { policyHealth, probeEligibility, probeSeries, settleEligibility } from "@/lib/policyState";
+import { MAX_LAG_BLOCKS, MIN_OUTAGE_BLOCKS, MIN_OUTAGE_SECS, PAYOUT_COOLDOWN_SECS, SETTLE_WINDOW_SECONDS } from "@/lib/pricing";
+import { policyHealth, probeEligibility, probeSeries, releaseEligibility, settleEligibility } from "@/lib/policyState";
 import type { Policy } from "@/lib/types";
 import { formatBps, formatDuration, formatGen, formatTime, shortAddress, timeAgo } from "@/lib/units";
 import { ConsensusBreakdown } from "./ConsensusBreakdown";
-import { LatencyChart } from "./LatencyChart";
+import { BlockLagChart } from "./BlockLagChart";
 import { UptimeBadge } from "./UptimeBadge";
 import { Button, Card, Dot, EmptyState, Pill, Row } from "./ui";
 
-const PRIORITY: Record<string, number> = { BREACH_PENDING: 0, ACTIVE: 1, PAID: 2, LAPSED: 3, EXPIRED: 4 };
+const PRIORITY: Record<string, number> = { BREACH_PENDING: 0, VESTING: 1, ACTIVE: 2, PAID: 3, LAPSED: 4, EXPIRED: 5 };
 
 export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
-  const { policies, incidents, now, account, metrics, loading, canTransact, tx, triggerProbe, settleClaim, expirePolicy, votesByIncident } = useProtocol();
+  const { policies, incidents, now, account, metrics, loading, canTransact, tx, triggerProbe, settleClaim, releasePayout, expirePolicy, votesByIncident } = useProtocol();
   const [onlyMine, setOnlyMine] = useState(false);
   const [picked, setPicked] = useState<number | null>(initialPolicyId ?? null);
 
@@ -86,7 +86,7 @@ export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
                       {(() => { const h = policyHealth(selected, now); return <Pill tone={h.tone}><Dot tone={h.tone} live={h.live} />{h.label}</Pill>; })()}
                     </div>
                     <p className="mt-1 text-xs text-muted">
-                      Policy #{selected.id} · held by {shortAddress(selected.holder)} · {selected.probeMode === "rpc" ? "JSON-RPC" : "HTTP"} probe · ≤ {selected.maxLatencyMs} ms · every {formatDuration(selected.probeInterval)}
+                      Policy #{selected.id} · {selected.endpointId} · held by {shortAddress(selected.holder)} · chain {selected.chainId} · every {formatDuration(selected.probeInterval)}
                     </p>
                   </div>
                   <UptimeBadge uptimeBps={selected.uptimeBps} slaBps={selected.minUptimeBps} samples={selected.samplesTotal} />
@@ -94,8 +94,10 @@ export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
                 <dl className="mt-4 grid gap-x-8 border-t border-line pt-3 sm:grid-cols-2">
                   <Row label="Last probed block">{selected.lastBlock > 0 ? selected.lastBlock.toLocaleString("en-US") : "—"}</Row>
                   <Row label="Last probe">{timeAgo(selected.lastProbeAt, now)}</Row>
-                  <Row label="Last latency">{selected.lastProbeAt ? `${selected.lastLatencyMs} ms` : "—"}</Row>
+                  <Row label="Reference head">{selected.lastRefHead > 0 ? selected.lastRefHead.toLocaleString("en-US") : "—"}</Row>
                   <Row label="Failure streak">{selected.consecutiveFailures} / 3</Row>
+                  <Row label="Outage continuity">{selected.consecutiveFailures > 0 ? `${formatDuration(Math.max(0, selected.lastProbeAt - selected.outageStartedAt))} · ${selected.outageBlocks} blocks` : "—"}</Row>
+                  <Row label="Inconclusive rounds">{selected.inconclusiveRounds}</Row>
                   <Row label="Coverage">{formatGen(selected.coverage)} GEN</Row>
                   <Row label={selected.status === "ACTIVE" ? "Expires in" : "Status"}>{selected.status === "ACTIVE" ? formatDuration(selected.expiresAt - now) : selected.status.replace("_", " ").toLowerCase()}</Row>
                 </dl>
@@ -103,8 +105,20 @@ export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
 
               {selected.status === "BREACH_PENDING" && (
                 <div role="alert" className="rounded-xl border border-danger/40 bg-danger-dim px-5 py-4 text-sm text-danger">
-                  <p className="font-semibold">SLA breach confirmed — {formatGen(selected.coverage)} GEN reserved.</p>
-                  <p className="mt-1 text-ink/80">A fresh validator round re-verifies the endpoint once the grace period ends. If it is still failing, the payout is released to the policyholder automatically.</p>
+                  <p className="font-semibold">Corroborated outage staged — {formatGen(selected.coverage)} GEN reserved.</p>
+                  <p className="mt-1 text-ink/80">
+                    The failure held for {selected.consecutiveFailures} consecutive rounds, {formatDuration(Math.max(0, selected.lastProbeAt - selected.outageStartedAt))} and {selected.outageBlocks} reference blocks
+                    (minimums {formatDuration(MIN_OUTAGE_SECS)} / {MIN_OUTAGE_BLOCKS} blocks). A fresh corroborated round re-verifies the endpoint once the grace period ends; if it is still failing the breach is confirmed and the payout starts vesting.
+                  </p>
+                </div>
+              )}
+              {selected.status === "VESTING" && (
+                <div role="status" className="rounded-xl border border-danger/40 bg-danger-dim px-5 py-4 text-sm">
+                  <p className="font-semibold text-danger">Breach confirmed — payout vesting.</p>
+                  <p className="mt-1 text-ink/80">
+                    {formatGen(selected.payout)} GEN of {formatGen(selected.coverage)} GEN coverage. {formatGen(selected.released)} GEN released, {formatGen(selected.releasable)} GEN releasable now.
+                    Nothing is released for {formatDuration(PAYOUT_COOLDOWN_SECS)} after confirmation, then the payout streams to {shortAddress(selected.holder)}.
+                  </p>
                 </div>
               )}
               {selected.status === "PAID" && (
@@ -113,10 +127,10 @@ export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
                 </div>
               )}
 
-              <Card title="Latency vs SLA" action={<span className="text-xs text-muted">{series.length} probes</span>}>
-                <LatencyChart points={series} limitMs={selected.maxLatencyMs} />
+              <Card title="Block lag vs reference head" action={<span className="text-xs text-muted">{series.length} rounds</span>}>
+                <BlockLagChart points={series} limit={MAX_LAG_BLOCKS} />
                 <div className="mt-3 flex gap-0.5" aria-label="Probe history" role="img">
-                  {series.slice(-60).map((p) => <span key={p.index} title={formatTime(p.time)} className={`h-3 flex-1 rounded-sm ${p.ok ? "bg-pulse/70" : "bg-danger"}`} />)}
+                  {series.slice(-60).map((p) => <span key={p.index} title={formatTime(p.time)} className={`h-3 flex-1 rounded-sm ${p.verdict === "INCONCLUSIVE" ? "bg-zinc-600" : p.ok ? "bg-pulse/70" : "bg-danger"}`} />)}
                 </div>
               </Card>
 
@@ -133,23 +147,28 @@ export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
                 {(() => {
                   const pe = probeEligibility(selected, now);
                   const se = settleEligibility(selected, now);
+                  const re = releaseEligibility(selected, now);
                   const expirable = (selected.status === "ACTIVE" && now >= selected.expiresAt) || (selected.status === "BREACH_PENDING" && now > selected.settleAt + SETTLE_WINDOW_SECONDS);
                   return (
                     <div className="space-y-4">
                       <div className="flex flex-wrap gap-3">
-                        {selected.status !== "BREACH_PENDING" && (
+                        {selected.status === "ACTIVE" && (
                           <Button loading={busy} disabled={!pe.can || !canTransact} onClick={() => void triggerProbe(selected.id)}>Trigger probe</Button>
                         )}
                         {selected.status === "BREACH_PENDING" && (
                           <Button variant="danger" loading={busy} disabled={!se.can || !canTransact} onClick={() => void settleClaim(selected.id)}>Settle claim</Button>
                         )}
+                        {selected.status === "VESTING" && (
+                          <Button variant="danger" loading={busy} disabled={!re.can || !canTransact} onClick={() => void releasePayout(selected.id)}>Release payout</Button>
+                        )}
                         {expirable && <Button variant="ghost" loading={busy} disabled={!canTransact} onClick={() => void expirePolicy(selected.id)}>Expire policy</Button>}
                       </div>
                       <p className="text-xs text-muted">
                         {!canTransact ? "Connect a wallet to transact. "
-                          : selected.status === "BREACH_PENDING" ? (se.reason ?? "Ready: a fresh consensus round will decide the payout. ")
+                          : selected.status === "BREACH_PENDING" ? (se.reason ?? "Ready: a fresh corroborated round will decide whether the breach is confirmed. ")
+                          : selected.status === "VESTING" ? (re.reason ?? `Ready: ${formatGen(selected.releasable)} GEN can be released to the holder now. `)
                           : (pe.reason ?? "Ready. ")}
-                        {metrics && `Bond ${formatGen(metrics.probeBond, 4)} GEN — refunded when a failure is confirmed, forfeited to underwriters when the endpoint is healthy.`}
+                        {selected.status !== "VESTING" && metrics && `Bond ${formatGen(metrics.probeBond, 4)} GEN — refunded when a corroborated failure is found or the round is inconclusive, forfeited to underwriters when the endpoint is healthy.`}
                       </p>
                     </div>
                   );

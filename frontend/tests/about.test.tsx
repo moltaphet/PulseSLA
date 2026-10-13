@@ -9,8 +9,11 @@ describe("About page", () => {
       expect(screen.getByRole("heading", { name })).toBeInTheDocument();
     }
     expect(screen.getAllByRole("listitem").length).toBeGreaterThanOrEqual(10);
-    expect(screen.getByText("Pre-activation health verification")).toBeInTheDocument();
-    expect(screen.getByText("7-day linear payout vesting")).toBeInTheDocument();
+    expect(screen.getByText("No arbitrary endpoints")).toBeInTheDocument();
+    expect(screen.getByText("Corroborated, continuous outages")).toBeInTheDocument();
+    expect(screen.getByText("Age ramp, cooldown and streaming payout")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Cover on authenticated infrastructure/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Trust moves to the registry governor/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /Closing the structural gaps/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /What PulseSLA does not claim/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /Residual risk 1/ })).toBeInTheDocument();
@@ -22,7 +25,7 @@ describe("About page", () => {
     expect(screen.getByText(/economic invariant/)).toBeInTheDocument();
     expect(screen.getByText(/absorbs the full pending reserved liability/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /not continuous pings/ })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /validated in the test harness/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Latency is not an enforced metric/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /GenLayer docs/ })).toHaveAttribute("href", "https://docs.genlayer.com");
   });
 

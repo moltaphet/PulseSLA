@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ConsensusBreakdown } from "@/components/ConsensusBreakdown";
 import { IncidentInspector } from "@/components/IncidentInspector";
-import { LatencyChart } from "@/components/LatencyChart";
+import { BlockLagChart } from "@/components/BlockLagChart";
 import { PolicyMarketplace } from "@/components/PolicyMarketplace";
 import { Sentinel } from "@/components/Sentinel";
 import { UnderwritingPortal } from "@/components/UnderwritingPortal";
@@ -11,6 +11,7 @@ import { UptimeBadge } from "@/components/UptimeBadge";
 import { DemoClient } from "@/lib/chain/demo";
 import { quotePremium } from "@/lib/pricing";
 import { ATTO, daysToBlocks, formatGen } from "@/lib/units";
+import { DEMO_GOVERNOR } from "@/lib/sim/seed";
 import { makeDemo, makeDemoUnfrozen, renderWithProtocol } from "./utils";
 
 vi.mock("next/link", () => ({
@@ -93,23 +94,36 @@ describe("UnderwritingPortal", () => {
 });
 
 describe("PolicyMarketplace", () => {
-  const fill = async (user: ReturnType<typeof userEvent.setup>, url: string, coverage: string) => {
-    await user.type(await screen.findByLabelText("Endpoint URL"), url);
+  const fill = async (user: ReturnType<typeof userEvent.setup>, provider: RegExp, coverage: string) => {
+    await user.click(await screen.findByRole("radio", { name: provider }));
     await user.type(screen.getByLabelText("Coverage amount"), coverage);
   };
 
-  it("rejects unsafe endpoints as you type", async () => {
-    const user = userEvent.setup();
+  it("offers only authenticated registry endpoints: there is no URL input", async () => {
     renderWithProtocol(<PolicyMarketplace />);
-    await user.type(await screen.findByLabelText("Endpoint URL"), "http://127.0.0.1:8545");
-    expect(screen.getByRole("alert")).toHaveTextContent(/Private and reserved/);
+    const group = await screen.findByRole("radiogroup", { name: "Authenticated endpoint" });
+    expect(within(group).getAllByRole("radio")).toHaveLength(5);
+    expect(within(group).getByRole("radio", { name: /Helios Node/ })).toBeEnabled();
+    expect(screen.queryByLabelText(/Endpoint URL/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Max latency/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/never takes a URL/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /mint policy/i })).toBeDisabled();
+  });
+
+  it("will not let you pick a delisted or still-authenticating listing", async () => {
+    const client = makeDemo();
+    client.sim.delistEndpoint(DEMO_GOVERNOR, "quartz-labs");
+    renderWithProtocol(<PolicyMarketplace />, { client });
+    const quartz = await screen.findByRole("radio", { name: /Quartz Labs/ });
+    expect(quartz).toBeDisabled();
+    expect(within(quartz.closest("label")!).getByText("Delisted")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Helios Node/ })).toBeEnabled();
   });
 
   it("previews the exact premium the contract will charge", async () => {
     const user = userEvent.setup();
     renderWithProtocol(<PolicyMarketplace />);
-    await fill(user, "https://rpc.fresh-node.io", "5");
+    await fill(user, /Quartz Labs/, "5");
     const gold = quotePremium(5n * ATTO, daysToBlocks(30), 9990);
     expect(screen.getByTestId("premium")).toHaveTextContent(`${formatGen(gold, 6)} GEN`);
     await user.click(screen.getByRole("radio", { name: /Silver/ }));
@@ -123,7 +137,7 @@ describe("PolicyMarketplace", () => {
   it("explains the exposure cap that blocks oversized coverage", async () => {
     const user = userEvent.setup();
     renderWithProtocol(<PolicyMarketplace />);
-    await fill(user, "https://rpc.fresh-node.io", "500");
+    await fill(user, /Quartz Labs/, "500");
     expect(screen.getByRole("alert")).toHaveTextContent(/at most .* GEN.*cap/);
     expect(screen.getByRole("button", { name: /mint policy/i })).toBeDisabled();
   });
@@ -131,30 +145,24 @@ describe("PolicyMarketplace", () => {
   it("flags out-of-range parameters", async () => {
     const user = userEvent.setup();
     renderWithProtocol(<PolicyMarketplace />);
-    await fill(user, "https://rpc.fresh-node.io", "1");
-    const latency = screen.getByLabelText("Max latency");
-    await user.clear(latency);
-    await user.type(latency, "5");
-    expect(screen.getByText(/Enter 50–30,000 ms/)).toBeInTheDocument();
-    await user.clear(latency);
-    await user.type(latency, "400");
+    await fill(user, /Quartz Labs/, "1");
     const days = screen.getByLabelText("Duration");
     await user.clear(days);
     await user.type(days, "999");
     expect(screen.getByText(/between 1 hour and 365 days/)).toBeInTheDocument();
   });
 
-  it("mints a policy and links to the sentinel", async () => {
+  it("mints a policy on a registry id and links to the sentinel", async () => {
     const user = userEvent.setup();
     const { client } = renderWithProtocol(<PolicyMarketplace />);
-    await fill(user, "https://rpc.fresh-node.io", "5");
+    await fill(user, /Quartz Labs/, "5");
     await user.click(screen.getByRole("button", { name: /mint policy · pay/i }));
     const banner = await screen.findByText(/Policy #6 minted/);
     expect(banner).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Sentinel/ })).toHaveAttribute("href", "/sentinel?policy=6");
     const p = demo(client).sim.get(6);
-    expect(p).toMatchObject({ host: "rpc.fresh-node.io", coverage: 5n * ATTO, minUptimeBps: 9990 });
-    expect(screen.getByLabelText("Endpoint URL")).toHaveValue("");
+    expect(p).toMatchObject({ endpointId: "quartz-labs", host: "rpc.quartz-labs.dev", coverage: 5n * ATTO, minUptimeBps: 9990 });
+    expect(screen.getByRole("radio", { name: /Quartz Labs/ })).not.toBeChecked();
   });
 });
 
@@ -165,14 +173,17 @@ describe("Sentinel", () => {
     const items = within(list).getAllByRole("button");
     expect(items).toHaveLength(5);
     expect(items[0]).toHaveTextContent("relay.nimbus-bridge.net");
-    expect(items[0]).toHaveTextContent("Breach confirmed");
+    expect(items[0]).toHaveTextContent("Breach staged");
+    expect(items[1]).toHaveTextContent("sequencer.vertex-l2.com");
+    expect(items[1]).toHaveTextContent("Payout vesting");
     expect(within(list).getAllByText("Healthy").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("shows the breach, the uptime badge, the chart and the consensus roll", async () => {
+  it("shows the staged outage, the uptime badge, the chart and the consensus roll", async () => {
     renderWithProtocol(<Sentinel />);
     const detail = await screen.findByTestId("sentinel-detail");
-    expect(within(detail).getByRole("alert")).toHaveTextContent(/SLA breach confirmed/);
+    expect(within(detail).getByRole("alert")).toHaveTextContent(/Corroborated outage staged/);
+    expect(within(detail).getByText("Outage continuity")).toBeInTheDocument();
     expect(within(detail).getByTestId("uptime-value")).toHaveTextContent("%");
     expect(within(detail).getAllByTestId("probe-point").length).toBeGreaterThan(10);
     expect(within(detail).getByTestId("consensus-breakdown")).toHaveTextContent(/of 5 validators agree/);
@@ -180,17 +191,35 @@ describe("Sentinel", () => {
     expect(within(detail).getByText(/Grace period ends in/)).toBeInTheDocument();
   });
 
-  it("settles a staged claim once the grace period has elapsed", async () => {
+  it("confirms a staged claim after the grace period; the payout then vests rather than paying at once", async () => {
     const user = userEvent.setup();
     const client = makeDemo();
     client.advance(3 * 3600);
+    const holderBefore = client.sim.balanceOf(client.sim.get(3).holder);
     renderWithProtocol(<Sentinel />, { client });
     const settle = await screen.findByRole("button", { name: "Settle claim" });
     await waitFor(() => expect(settle).toBeEnabled());
     await user.click(settle);
-    await waitFor(() => expect(client.sim.get(3).status).toBe("PAID"));
-    expect(await screen.findByText(/Claim paid\./)).toBeInTheDocument();
+    await waitFor(() => expect(client.sim.get(3).status).toBe("VESTING"));
+    expect(await screen.findByText(/Breach confirmed — payout vesting\./)).toBeInTheDocument();
+    expect(client.sim.balanceOf(client.sim.get(3).holder)).toBe(holderBefore); // nothing moved yet
+    expect(screen.getByRole("button", { name: "Release payout" })).toBeDisabled();
+    expect(screen.getByText(/Cooldown ends in/)).toBeInTheDocument();
     expect(client.sim.metrics().solvent).toBe(true);
+  });
+
+  it("releases the vested payout to the holder once the cooldown has passed", async () => {
+    const user = userEvent.setup();
+    const client = makeDemo();
+    renderWithProtocol(<Sentinel initialPolicyId={4} />, { client });
+    const release = await screen.findByRole("button", { name: "Release payout" });
+    await waitFor(() => expect(release).toBeEnabled());
+    const holder = client.sim.get(4).holder;
+    const before = client.sim.balanceOf(holder);
+    const owed = client.sim.get(4).releasable;
+    expect(owed).toBeGreaterThan(0n);
+    await user.click(release);
+    await waitFor(() => expect(client.sim.balanceOf(holder)).toBe(before + owed));
   });
 
   it("explains why a probe is not yet allowed, and runs one when it is", async () => {
@@ -229,18 +258,20 @@ describe("Sentinel", () => {
   it("honours a deep-linked policy id", async () => {
     renderWithProtocol(<Sentinel initialPolicyId={4} />);
     expect(await screen.findByRole("heading", { name: "sequencer.vertex-l2.com" })).toBeInTheDocument();
-    expect(screen.getByText(/Claim paid\./)).toBeInTheDocument();
+    expect(screen.getByText(/Breach confirmed — payout vesting\./)).toBeInTheDocument();
   });
 });
 
 describe("IncidentInspector", () => {
-  it("summarises breaches and lists parametric payouts", async () => {
+  it("summarises breaches and lists parametric payouts with their vesting progress", async () => {
     renderWithProtocol(<IncidentInspector />);
-    expect(await screen.findByTestId("stat-breaches-confirmed")).toHaveTextContent("2");
-    expect(screen.getByTestId("stat-claims-paid")).toHaveTextContent("1");
+    expect(await screen.findByTestId("stat-breaches-confirmed")).toHaveTextContent("1");
+    expect(screen.getByTestId("stat-inconclusive-rounds")).toHaveTextContent("3");
+    expect(Number(screen.getByTestId("stat-failing-rounds").textContent?.match(/\d+/)?.[0])).toBeGreaterThan(0);
     const payouts = screen.getByRole("heading", { name: "Parametric payouts" }).closest("section")!;
     expect(payouts).toHaveTextContent("sequencer.vertex-l2.com");
     expect(payouts).toHaveTextContent(/−[\d.]+ GEN/);
+    expect(payouts).toHaveTextContent(/released · .* releasable now/);
   });
 
   it("defaults to breach events and drills into the consensus reasoning", async () => {
@@ -253,17 +284,18 @@ describe("IncidentInspector", () => {
     expect(payoutRow).toHaveAttribute("aria-expanded", "false");
     await user.click(payoutRow);
     const detail = await screen.findByTestId("incident-detail");
+    expect(within(detail).getByText("Reference baseline")).toBeInTheDocument();
     expect(within(detail).getByText("HTTP status")).toBeInTheDocument();
-    expect(within(detail).getByText("Consensus verdict")).toBeInTheDocument();
+    expect(within(detail).getByText("Corroborated verdict")).toBeInTheDocument();
     expect(within(detail).getByTestId("consensus-breakdown")).toBeInTheDocument();
     await user.click(payoutRow);
     expect(screen.queryByTestId("incident-detail")).not.toBeInTheDocument();
   });
 
-  it("filters to failing probes and by policy", async () => {
+  it("filters to failing rounds and by policy", async () => {
     const user = userEvent.setup();
     renderWithProtocol(<IncidentInspector />);
-    await user.click(await screen.findByRole("button", { name: "Failing probes" }));
+    await user.click(await screen.findByRole("button", { name: "Failing rounds" }));
     const log = screen.getByRole("list", { name: "Incident events" });
     const rows = within(log).getAllByRole("button");
     expect(rows.every((r) => /Probe · failing/.test(r.textContent ?? ""))).toBe(true);
@@ -272,7 +304,23 @@ describe("IncidentInspector", () => {
     expect(filtered.length).toBeGreaterThan(0);
     expect(filtered.length).toBeLessThan(rows.length);
     await user.click(screen.getByRole("button", { name: "Payouts" }));
-    expect(within(screen.getByRole("list", { name: "Incident events" })).getAllByRole("button")).toHaveLength(1);
+    // the confirmation and each release for the vertex policy
+    const payoutRows = within(screen.getByRole("list", { name: "Incident events" })).getAllByRole("button");
+    expect(payoutRows.length).toBeGreaterThanOrEqual(2);
+    expect(payoutRows.some((r) => /Payout released/.test(r.textContent ?? ""))).toBe(true);
+  });
+
+  it("separates inconclusive rounds from failures and lists registry events", async () => {
+    const user = userEvent.setup();
+    renderWithProtocol(<IncidentInspector />);
+    await user.click(await screen.findByRole("button", { name: "Inconclusive rounds" }));
+    const rows = within(screen.getByRole("list", { name: "Incident events" })).getAllByRole("button");
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => /Probe · inconclusive/.test(r.textContent ?? ""))).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Registry" }));
+    const reg = within(screen.getByRole("list", { name: "Incident events" })).getAllByRole("button");
+    expect(reg).toHaveLength(5);
+    expect(reg[0]).toHaveTextContent("Endpoint listed");
   });
 
   it("shows an empty state when nothing matches", async () => {
@@ -285,22 +333,26 @@ describe("IncidentInspector", () => {
 });
 
 describe("presentational pieces", () => {
-  const pt = (i: number, ok: boolean, ms: number) => ({ index: i, time: 1000 + i * 60, latencyMs: ms, ok, reason: ok ? "OK" : "HTTP_ERROR", status: ok ? 200 : 502, block: 10 });
-
-  it("LatencyChart draws every probe, the SLA line, and colours failures", () => {
-    render(<LatencyChart points={[pt(1, true, 80), pt(2, false, 9000), pt(3, true, 120)]} limitMs={500} />);
-    const points = screen.getAllByTestId("probe-point");
-    expect(points).toHaveLength(3);
-    expect(points.map((p) => p.getAttribute("data-ok"))).toEqual(["true", "false", "true"]);
-    expect(points[1]).toHaveAttribute("data-clipped");
-    expect(screen.getByTestId("sla-line")).toBeInTheDocument();
-    expect(screen.getByRole("img")).toHaveAccessibleName(/3 probes against the 500 millisecond limit; 1 failed/);
+  const pt = (i: number, verdict: "HEALTHY" | "FAILING" | "INCONCLUSIVE", lag: number | null) => ({
+    index: i, time: 1000 + i * 60, verdict, ok: verdict === "HEALTHY", reason: verdict === "HEALTHY" ? "OK" : "HTTP_ERROR",
+    status: verdict === "HEALTHY" ? 200 : 502, block: lag === null ? -1 : 1000 - lag, refHead: 1000, lagBlocks: lag,
   });
 
-  it("LatencyChart has an empty state and caps the window", () => {
-    const { rerender } = render(<LatencyChart points={[]} limitMs={500} />);
-    expect(screen.getByText("No probes recorded yet")).toBeInTheDocument();
-    rerender(<LatencyChart points={Array.from({ length: 200 }, (_, i) => pt(i, true, 50))} limitMs={500} max={50} />);
+  it("BlockLagChart draws every round against the staleness line, colouring failures and hollowing inconclusive rounds", () => {
+    render(<BlockLagChart points={[pt(1, "HEALTHY", 2), pt(2, "FAILING", null), pt(3, "INCONCLUSIVE", null), pt(4, "FAILING", 90)]} limit={50} />);
+    const points = screen.getAllByTestId("probe-point");
+    expect(points).toHaveLength(4);
+    expect(points.map((p) => p.getAttribute("data-verdict"))).toEqual(["HEALTHY", "FAILING", "INCONCLUSIVE", "FAILING"]);
+    expect(points[1]).toHaveAttribute("data-unobserved");
+    expect(points[2].getAttribute("fill")).toBe("none");
+    expect(screen.getByTestId("sla-line")).toBeInTheDocument();
+    expect(screen.getByRole("img")).toHaveAccessibleName(/4 rounds against the 50 block limit; 2 failing, 1 inconclusive/);
+  });
+
+  it("BlockLagChart has an empty state and caps the window", () => {
+    const { rerender } = render(<BlockLagChart points={[]} limit={50} />);
+    expect(screen.getByText("No corroborated rounds recorded yet")).toBeInTheDocument();
+    rerender(<BlockLagChart points={Array.from({ length: 200 }, (_, i) => pt(i, "HEALTHY", 1))} limit={50} max={50} />);
     expect(screen.getAllByTestId("probe-point")).toHaveLength(50);
   });
 
@@ -316,7 +368,7 @@ describe("presentational pieces", () => {
   });
 
   it("ConsensusBreakdown tallies agreement and flags a failed quorum", () => {
-    const vote = (n: number, agree: boolean) => ({ validator: `validator-${n}`, role: n === 1 ? ("leader" as const) : ("validator" as const), agree, reason: "OK" as const, status: 200, latencyMs: 90, block: 5 });
+    const vote = (n: number, agree: boolean) => ({ validator: `validator-${n}`, role: n === 1 ? ("leader" as const) : ("validator" as const), agree, verdict: "HEALTHY" as const, reason: "OK" as const, status: 200, block: 5, refsOk: 4 });
     const { rerender } = render(<ConsensusBreakdown votes={[vote(1, true), vote(2, true), vote(3, true), vote(4, false), vote(5, true)]} />);
     expect(screen.getByText("4 of 5 validators agree")).toBeInTheDocument();
     expect(screen.getByText("Consensus reached")).toBeInTheDocument();

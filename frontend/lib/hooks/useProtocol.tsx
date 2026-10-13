@@ -8,7 +8,7 @@ import { errorMessage, type ProtocolClient } from "../chain/client";
 import { DemoClient, isDemoClient } from "../chain/demo";
 import { CHAIN_ID, resolveMode } from "../config";
 import type {
-  CreatePolicyArgs, Incident, Policy, PoolMetrics, TxReceipt, UnderwriterPosition,
+  CreatePolicyArgs, Endpoint, Incident, Policy, PoolMetrics, TxReceipt, UnderwriterPosition,
 } from "../types";
 import { useWallet, type Eip1193Provider, type WalletState } from "./useWallet";
 
@@ -28,6 +28,7 @@ export interface ProtocolContextValue {
   metrics: PoolMetrics | null;
   position: UnderwriterPosition | null;
   balance: bigint | null;
+  endpoints: Endpoint[];
   policies: Policy[];
   incidents: Incident[];
   /** Unix seconds: the simulated clock in demo mode, wall time in live mode. */
@@ -42,6 +43,7 @@ export interface ProtocolContextValue {
   createPolicy(args: CreatePolicyArgs, premium: bigint): Promise<number | null>;
   triggerProbe(policyId: number): Promise<TxReceipt | null>;
   settleClaim(policyId: number): Promise<TxReceipt | null>;
+  releasePayout(policyId: number): Promise<TxReceipt | null>;
   expirePolicy(policyId: number): Promise<boolean>;
   quote(coverage: bigint, durationBlocks: number, minUptimeBps: number): Promise<bigint>;
   /** Votes observed this session, keyed by incident index, so the inspector can show the roll call. */
@@ -79,6 +81,7 @@ export function ProtocolProvider({ children, client: injected, walletProvider, p
   const [metrics, setMetrics] = useState<PoolMetrics | null>(null);
   const [position, setPosition] = useState<UnderwriterPosition | null>(null);
   const [balance, setBalance] = useState<bigint | null>(null);
+  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
@@ -91,13 +94,14 @@ export function ProtocolProvider({ children, client: injected, walletProvider, p
   const load = useCallback(async (): Promise<Incident[] | null> => {
     const mine = ++seq.current;
     try {
-      const [m, ps, inc] = await Promise.all([client.getPoolMetrics(), client.listPolicies(), client.getIncidents()]);
+      const [m, ps, inc, eps] = await Promise.all([client.getPoolMetrics(), client.listPolicies(), client.getIncidents(), client.listEndpoints()]);
       const [pos, bal] = account
         ? await Promise.all([client.getUnderwriter(account), client.getBalance(account)])
         : [null, null];
       if (mine !== seq.current) return null; // a newer refresh superseded this one
       setMetrics(m);
       setPolicies(ps);
+      setEndpoints(eps);
       setIncidents(inc);
       setPosition(pos);
       setBalance(bal);
@@ -154,7 +158,7 @@ export function ProtocolProvider({ children, client: injected, walletProvider, p
 
   const value = useMemo<ProtocolContextValue>(
     () => ({
-      mode: client.mode, client, wallet, account, canTransact, metrics, position, balance, policies, incidents, now,
+      mode: client.mode, client, wallet, account, canTransact, metrics, position, balance, endpoints, policies, incidents, now,
       loading, error, tx, refresh, votesByIncident: votes,
       dismissTx: () => setTx({ phase: "idle" }),
       quote: (c, b, u) => client.quotePremium(c, b, u),
@@ -168,10 +172,11 @@ export function ProtocolProvider({ children, client: injected, walletProvider, p
       },
       triggerProbe: (id) => exec(`Probe policy #${id}`, () => client.triggerProbe(need(), id, probeBond), (r) => r, id),
       settleClaim: (id) => exec(`Settle claim on policy #${id}`, () => client.settleClaim(need(), id, probeBond), (r) => r, id),
+      releasePayout: (id) => exec(`Release payout on policy #${id}`, () => client.releasePayout(need(), id), (r) => r),
       expirePolicy: async (id) => (await exec(`Expire policy #${id}`, () => client.expirePolicy(need(), id), () => true)) ?? false,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [client, wallet, account, canTransact, metrics, position, balance, policies, incidents, now, loading, error, tx, refresh, votes, exec, probeBond],
+    [client, wallet, account, canTransact, metrics, position, balance, endpoints, policies, incidents, now, loading, error, tx, refresh, votes, exec, probeBond],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -19,10 +19,10 @@ export function UnderwritingPortal() {
   const check = tab === "deposit" ? validateDeposit(input, balance) : validateWithdraw(input, pos.value, pos.withdrawable);
   const preview =
     check.amount === null ? null
-    : tab === "deposit" ? { label: "Shares minted", value: previewDeposit(check.amount, metrics.tvl, metrics.totalShares) }
+    : tab === "deposit" ? { label: "Shares minted", value: previewDeposit(check.amount, metrics.netAssets, metrics.totalShares) }
     : { label: "Shares burned", value: previewWithdrawBurn(check.amount, metrics.netAssets, metrics.totalShares) };
   const max = tab === "deposit" ? balance : pos.withdrawable;
-  const frozen = tab === "deposit" && metrics.reservedPayouts > 0n;
+  const frozen = tab === "deposit" && metrics.stagedClaims > 0n;
 
   const submit = async () => {
     if (check.amount === null) return;
@@ -57,7 +57,7 @@ export function UnderwritingPortal() {
           badge={<Pill tone="muted">cap {formatBps(8000, 0)}</Pill>} hint="Share of TVL locked behind live coverage">
           <div className="relative mt-3 h-1.5 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-violet-500" style={{ width: `${Math.min(100, metrics.utilizationBps / 80)}%` }} /></div>
         </Stat>
-        <Stat className="lg:col-span-2" label="Share price" value={`${(Number((metrics.sharePrice * 10_000n) / ATTO) / 10_000).toFixed(4)}`} hint={metrics.reservedPayouts > 0n ? "Net of capital reserved for staged claims" : "GEN per pool share"} badge={<Pill tone="muted">{formatGen(metrics.totalShares, 2)} shares</Pill>} />
+        <Stat className="lg:col-span-2" label="Share price" value={`${(Number((metrics.sharePrice * 10_000n) / ATTO) / 10_000).toFixed(4)}`} hint={metrics.reservedPayouts > 0n ? "Net of capital reserved for staged claims and vesting payouts" : "GEN per pool share"} badge={<Pill tone="muted">{formatGen(metrics.totalShares, 2)} shares</Pill>} />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-5">
@@ -73,7 +73,7 @@ export function UnderwritingPortal() {
               hint={tab === "deposit" ? (balance !== null ? `Wallet balance ${formatGen(balance)} GEN` : undefined) : `Withdrawable now ${formatGen(pos.withdrawable)} GEN of ${formatGen(pos.value)} GEN`} />
             {frozen && (
               <p role="status" className="rounded-xl border border-amber-400/30 bg-warn-dim px-4 py-3 text-sm text-amber-200">
-                Deposits are frozen while a staged claim is reserved ({formatGen(metrics.reservedPayouts, 2)} GEN). They reopen when the claim settles. Withdrawals stay open at net asset value.
+                Deposits are frozen while a staged claim is reserved ({formatGen(metrics.stagedClaims, 2)} GEN). They reopen when the claim settles. Withdrawals stay open at net asset value.
               </p>
             )}
             {preview && (
@@ -106,7 +106,7 @@ export function UnderwritingPortal() {
             <Meter label="Pool liquidity composition" total={total} segments={[
               { label: `Free ${formatGen(metrics.freeLiquidity, 2)}`, value: Number(metrics.freeLiquidity), tone: "pulse" },
               { label: `Backing live cover ${formatGen(BigInt(Math.max(active, 0)), 2)}`, value: Math.max(active, 0), tone: "capital" },
-              { label: `Reserved for claims ${formatGen(metrics.reservedPayouts, 2)}`, value: Number(metrics.reservedPayouts), tone: "danger" },
+              { label: `Reserved for claims & vesting ${formatGen(metrics.reservedPayouts, 2)}`, value: Number(metrics.reservedPayouts), tone: "danger" },
             ]} />
             <p className="mt-3 text-xs text-muted">Invariant: locked coverage never exceeds pool assets, so a payout can never overdraw the pool.</p>
           </Card>

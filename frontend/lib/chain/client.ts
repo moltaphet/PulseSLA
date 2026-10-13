@@ -1,5 +1,5 @@
 import type {
-  CreatePolicyArgs, Incident, Policy, PoolMetrics, TxReceipt, UnderwriterPosition,
+  CreatePolicyArgs, Endpoint, Incident, Policy, PoolMetrics, TxReceipt, UnderwriterPosition,
 } from "../types";
 
 export type ClientMode = "demo" | "live";
@@ -9,6 +9,8 @@ export interface ProtocolClient {
   readonly mode: ClientMode;
   getPoolMetrics(): Promise<PoolMetrics>;
   getUnderwriter(address: string): Promise<UnderwriterPosition>;
+  /** The authenticated registry: the only endpoints a policy can insure. */
+  listEndpoints(): Promise<Endpoint[]>;
   listPolicies(): Promise<Policy[]>;
   getIncidents(): Promise<Incident[]>;
   quotePremium(coverage: bigint, durationBlocks: number, minUptimeBps: number): Promise<bigint>;
@@ -20,6 +22,8 @@ export interface ProtocolClient {
   createPolicy(sender: string, args: CreatePolicyArgs, premium: bigint): Promise<TxReceipt>;
   triggerProbe(sender: string, policyId: number, bond: bigint): Promise<TxReceipt>;
   settleClaim(sender: string, policyId: number, bond: bigint): Promise<TxReceipt>;
+  /** Permissionless: pays the holder the vested part of a confirmed payout. */
+  releasePayout(sender: string, policyId: number): Promise<TxReceipt>;
   expirePolicy(sender: string, policyId: number): Promise<TxReceipt>;
 }
 

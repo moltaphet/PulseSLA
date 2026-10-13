@@ -6,7 +6,7 @@
  * asserted against `quotePremium` in the test suite.
  */
 import { BLOCK_SECONDS, BPS, YEAR_SECONDS } from "./units";
-import type { Policy } from "./types";
+import type { Endpoint, Policy } from "./types";
 
 export const RATE_GOLD_BPS = 800n;
 export const RATE_SILVER_BPS = 400n;
@@ -14,8 +14,6 @@ export const RATE_BRONZE_BPS = 200n;
 export const MIN_PREMIUM_BPS = 10n;
 
 export const LIMITS = {
-  minLatencyMs: 50,
-  maxLatencyMs: 30_000,
   minUptimeBps: 9000,
   maxUptimeBps: 9999,
   minDurationBlocks: 300,
@@ -28,7 +26,18 @@ export const LIMITS = {
 
 export const CAPS_BPS = { policy: 1000n, host: 2000n, holder: 2000n, utilization: 8000n } as const;
 
+// Corroboration and continuity (mirrors the contract's constants of the same names).
 export const BREACH_CONSECUTIVE = 3;
+export const MIN_OUTAGE_SECS = 15 * 60;
+export const MIN_OUTAGE_BLOCKS = 25;
+export const MIN_REFERENCES = 3;
+export const MAX_REFERENCES = 4;
+export const MAX_LAG_BLOCKS = 50;
+export const LISTING_DELAY_SECS = 24 * 3600;
+export const MEASUREMENT_WINDOW_SECS = 30 * 86_400;
+export const MIN_UPTIME_WINDOW_SECS = 24 * 3600;
+export const PAYOUT_COOLDOWN_SECS = 24 * 3600;
+export const PAYOUT_VEST_SECS = 3 * 86_400;
 export const MAX_BLOCK_DRIFT = 10;
 export const EPOCH_SECONDS = 24 * 3600;
 export const MAX_EPOCH_PAYOUT_BPS = 3000n;
@@ -77,6 +86,14 @@ export function vestedPayout(coverage: bigint, ageSeconds: number): bigint {
   if (age >= PAYOUT_RAMP_SECONDS) return coverage;
   const bps = PAYOUT_FLOOR_BPS + ((BPS - PAYOUT_FLOOR_BPS) * BigInt(age)) / BigInt(PAYOUT_RAMP_SECONDS);
   return (coverage * bps) / BPS;
+}
+
+/** Mirror of `_releasable`: cumulative payout that may have been released by `now` (nothing during the cooldown, then linear). */
+export function releasableBy(payout: bigint, vestStart: number, now: number): bigint {
+  const t = now - vestStart - PAYOUT_COOLDOWN_SECS;
+  if (t <= 0) return 0n;
+  if (t >= PAYOUT_VEST_SECS) return payout;
+  return (payout * BigInt(t)) / BigInt(PAYOUT_VEST_SECS);
 }
 
 export function hostnameOf(url: string): string {
@@ -210,4 +227,18 @@ export function exposureFor(policies: readonly Policy[], host: string, holder: s
 /** Annualised premium income over TVL, in bps (mirrors the pool's apy_bps). */
 export function annualisedYieldBps(runRateAtto: bigint, tvl: bigint): number {
   return tvl === 0n ? 0 : Number((runRateAtto * BPS) / tvl);
+}
+
+/** Mirror of `_references`: the first MAX_REFERENCES listed, aged, distinct-provider endpoints on the same chain. */
+export function referencesFor(target: Endpoint, all: readonly Endpoint[], now: number): Endpoint[] {
+  const out: Endpoint[] = [];
+  const seen = new Set([target.apex]);
+  for (const e of all) {
+    if (out.length >= MAX_REFERENCES) break;
+    if (e.status !== "LISTED" || e.chainId !== target.chainId || now < e.listedAt + LISTING_DELAY_SECS) continue;
+    if (seen.has(e.apex)) continue;
+    seen.add(e.apex);
+    out.push(e);
+  }
+  return out;
 }

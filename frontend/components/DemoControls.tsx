@@ -8,7 +8,7 @@ import { Button } from "./ui";
 
 const MODES: { value: EndpointMode; label: string }[] = [
   { value: "healthy", label: "Healthy" },
-  { value: "slow", label: "High latency" },
+  { value: "ratelimited", label: "Rate limited (429)" },
   { value: "http502", label: "HTTP 502" },
   { value: "http504", label: "HTTP 504" },
   { value: "frozen", label: "Frozen block" },
@@ -62,7 +62,7 @@ export function DemoControls() {
                 </label>
               ))}
             </div>
-            <p className="text-xs text-zinc-400">Try it: break an endpoint, advance 1 min, probe it three times from the Sentinel, advance past the grace period, then settle the claim.</p>
+            <p className="text-xs text-zinc-400">Try it: break an endpoint, then alternate +1 h with a probe until three corroborated failing rounds stage a claim. Advance past the grace period, settle the claim, then +1 day and release the vested payout.</p>
           </div>
         )}
       </div>

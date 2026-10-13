@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import parity from "@/lib/__fixtures__/premium-parity.json";
 import {
-  apexOf, coverageLimits, exposureFor, hostnameOf, quotePremium, rateBpsFor, validateEndpointUrl, vestedPayout,
+  apexOf, coverageLimits, exposureFor, hostnameOf, PAYOUT_COOLDOWN_SECS, PAYOUT_VEST_SECS, quotePremium, rateBpsFor, referencesFor, releasableBy,
+  validateEndpointUrl, vestedPayout,
 } from "@/lib/pricing";
-import type { Policy } from "@/lib/types";
+import type { Endpoint, Policy } from "@/lib/types";
 import { ATTO } from "@/lib/units";
 
 describe("quotePremium: parity with the contract", () => {
@@ -86,10 +87,11 @@ describe("coverageLimits", () => {
 
 describe("exposureFor", () => {
   const mk = (over: Partial<Policy>): Policy => ({
-    id: 1, holder: "0xa", endpointUrl: "", host: "h.io", apex: "h.io", probeMode: "rpc", maxLatencyMs: 500, minUptimeBps: 9990, probeInterval: 60,
+    id: 1, holder: "0xa", endpointId: "h", endpointUrl: "", host: "h.io", apex: "h.io", chainId: 1, minUptimeBps: 9990, probeInterval: 60,
     coverage: ATTO, premium: 0n, createdAt: 0, activeFrom: 0, expiresAt: 0, status: "ACTIVE", samplesTotal: 0, samplesOk: 0,
-    uptimeBps: 10000, consecutiveFailures: 0, baselineOk: false, lastProbeAt: 0, lastBlock: 0, lastLatencyMs: 0, lastReason: "",
-    lastOk: false, settleAt: 0, claimCount: 0, payout: 0n, ...over,
+    uptimeBps: 10000, inconclusiveRounds: 0, downtimeSecs: 0, consecutiveFailures: 0, outageStartedAt: 0, outageBlocks: 0, baselineOk: false,
+    lastProbeAt: 0, lastBlock: 0, lastRefHead: 0, lastReason: "", lastOk: false, settleAt: 0, claimCount: 0, payout: 0n, released: 0n,
+    releasable: 0n, vestStart: 0, ...over,
   });
   it("counts only live policies, case-insensitively for holders", () => {
     const ps = [mk({}), mk({ id: 2, status: "BREACH_PENDING" }), mk({ id: 3, status: "PAID" }), mk({ id: 4, host: "other.io", holder: "0xB" })];
@@ -110,5 +112,36 @@ describe("apexOf: parity with the contract's registrable-domain grouping", () =>
     const live = { host: "rpc1.node.io", holder: "0xa", coverage: 3n * ATTO, status: "ACTIVE" } as Policy;
     expect(exposureFor([live], "rpc2.node.io", "0xz").host).toBe(3n * ATTO);
     expect(exposureFor([live], "rpc.other.io", "0xz").host).toBe(0n);
+  });
+});
+
+describe("releasableBy: parity with the contract's vesting schedule", () => {
+  const payout = 1000n * ATTO;
+  it("releases nothing during the cooldown, then streams linearly, then caps at the payout", () => {
+    expect(releasableBy(payout, 100, 100)).toBe(0n);
+    expect(releasableBy(payout, 100, 100 + PAYOUT_COOLDOWN_SECS)).toBe(0n);
+    expect(releasableBy(payout, 100, 100 + PAYOUT_COOLDOWN_SECS + PAYOUT_VEST_SECS / 4)).toBe(payout / 4n);
+    expect(releasableBy(payout, 100, 100 + PAYOUT_COOLDOWN_SECS + PAYOUT_VEST_SECS)).toBe(payout);
+    expect(releasableBy(payout, 100, 10 ** 9)).toBe(payout);
+  });
+  it("rounds down like the contract's integer division", () => {
+    expect(releasableBy(10n, 0, PAYOUT_COOLDOWN_SECS + 1)).toBe(0n);
+    expect(releasableBy(PAYOUT_VEST_SECS === 259_200 ? 259_201n : 0n, 0, PAYOUT_COOLDOWN_SECS + 1)).toBe(1n);
+  });
+});
+
+describe("referencesFor: parity with the contract's reference selection", () => {
+  const ep = (id: string, over: Partial<Endpoint> = {}): Endpoint => ({
+    id, provider: id, domain: `${id}.io`, url: `https://rpc.${id}.io`, host: `rpc.${id}.io`, apex: `${id}.io`, chainId: 1, attestation: "",
+    listedAt: 0, insurableFrom: 0, status: "LISTED", ...over,
+  });
+  const now = 10 * 86_400;
+  it("takes the first four aged, listed, distinct-provider endpoints on the chain, excluding the target's provider", () => {
+    const all = [ep("a"), ep("a2", { apex: "a.io" }), ep("b"), ep("c", { status: "DELISTED" }), ep("d", { chainId: 137 }), ep("e"), ep("f"), ep("g"), ep("h")];
+    expect(referencesFor(all[0], all, now).map((e) => e.id)).toEqual(["b", "e", "f", "g"]);
+  });
+  it("skips listings younger than the delay", () => {
+    const all = [ep("a"), ep("b", { listedAt: now - 10 }), ep("c")];
+    expect(referencesFor(all[0], all, now).map((e) => e.id)).toEqual(["c"]);
   });
 });

@@ -1,14 +1,38 @@
 [
   {
-    "name": "create_policy",
+    "name": "compute_attestation",
     "inputs": [
       {
-        "name": "endpoint_url",
+        "name": "endpoint_id",
         "type": "string"
       },
       {
-        "name": "max_latency_ms",
+        "name": "provider",
+        "type": "string"
+      },
+      {
+        "name": "domain",
+        "type": "string"
+      },
+      {
+        "name": "chain_id",
         "type": "int"
+      },
+      {
+        "name": "url",
+        "type": "string"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "string"
+  },
+  {
+    "name": "create_policy",
+    "inputs": [
+      {
+        "name": "endpoint_id",
+        "type": "string"
       },
       {
         "name": "coverage_amount",
@@ -25,15 +49,23 @@
       {
         "name": "probe_interval_blocks",
         "type": "int"
-      },
-      {
-        "name": "probe_mode",
-        "type": "string"
       }
     ],
     "readonly": false,
     "payable": true,
     "returns": "int"
+  },
+  {
+    "name": "delist_endpoint",
+    "inputs": [
+      {
+        "name": "endpoint_id",
+        "type": "string"
+      }
+    ],
+    "readonly": false,
+    "payable": false,
+    "returns": "string"
   },
   {
     "name": "deposit_underwriting",
@@ -51,6 +83,25 @@
       }
     ],
     "readonly": false,
+    "payable": false,
+    "returns": "string"
+  },
+  {
+    "name": "get_endpoint",
+    "inputs": [
+      {
+        "name": "endpoint_id",
+        "type": "string"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "dict"
+  },
+  {
+    "name": "get_governor",
+    "inputs": [],
+    "readonly": true,
     "payable": false,
     "returns": "string"
   },
@@ -104,6 +155,18 @@
     "returns": "dict"
   },
   {
+    "name": "get_references",
+    "inputs": [
+      {
+        "name": "endpoint_id",
+        "type": "string"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "array"
+  },
+  {
     "name": "get_underwriter",
     "inputs": [
       {
@@ -114,6 +177,22 @@
     "readonly": true,
     "payable": false,
     "returns": "dict"
+  },
+  {
+    "name": "list_endpoints",
+    "inputs": [
+      {
+        "name": "offset",
+        "type": "int"
+      },
+      {
+        "name": "limit",
+        "type": "int"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "array"
   },
   {
     "name": "list_policies",
@@ -152,6 +231,50 @@
     "returns": "string"
   },
   {
+    "name": "register_endpoint",
+    "inputs": [
+      {
+        "name": "endpoint_id",
+        "type": "string"
+      },
+      {
+        "name": "provider",
+        "type": "string"
+      },
+      {
+        "name": "domain",
+        "type": "string"
+      },
+      {
+        "name": "chain_id",
+        "type": "int"
+      },
+      {
+        "name": "url",
+        "type": "string"
+      },
+      {
+        "name": "attestation",
+        "type": "string"
+      }
+    ],
+    "readonly": false,
+    "payable": false,
+    "returns": "string"
+  },
+  {
+    "name": "release_payout",
+    "inputs": [
+      {
+        "name": "policy_id",
+        "type": "int"
+      }
+    ],
+    "readonly": false,
+    "payable": false,
+    "returns": "dict"
+  },
+  {
     "name": "settle_claim",
     "inputs": [
       {
@@ -162,6 +285,18 @@
     "readonly": false,
     "payable": true,
     "returns": "dict"
+  },
+  {
+    "name": "transfer_governor",
+    "inputs": [
+      {
+        "name": "new_governor_hex",
+        "type": "string"
+      }
+    ],
+    "readonly": false,
+    "payable": false,
+    "returns": "string"
   },
   {
     "name": "trigger_probe",

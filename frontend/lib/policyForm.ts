@@ -1,22 +1,21 @@
 import {
-  coverageLimits, exposureFor, hostnameOf, LIMITS, quotePremium, rateBpsFor, SLA_TIERS, validateEndpointUrl,
+  coverageLimits, exposureFor, LIMITS, MIN_REFERENCES, quotePremium, rateBpsFor, SLA_TIERS, referencesFor,
   type CapName, type CoverageLimits,
 } from "./pricing";
-import type { CreatePolicyArgs, Policy, ProbeMode } from "./types";
+import type { CreatePolicyArgs, Endpoint, Policy } from "./types";
 import { daysToBlocks, formatGen, parseGen, formatDuration } from "./units";
 
 export interface PolicyFormState {
-  url: string;
-  mode: ProbeMode;
+  /** Registry id of the endpoint to insure. There is deliberately no URL field. */
+  endpointId: string;
   tier: (typeof SLA_TIERS)[number]["id"];
-  maxLatencyMs: string;
   coverage: string;
   days: string;
   intervalMinutes: string;
 }
 
 export const DEFAULT_FORM: PolicyFormState = {
-  url: "", mode: "rpc", tier: "gold", maxLatencyMs: "500", coverage: "", days: "30", intervalMinutes: "5",
+  endpointId: "", tier: "gold", coverage: "", days: "30", intervalMinutes: "5",
 };
 
 export interface FormContext {
@@ -25,6 +24,9 @@ export interface FormContext {
   policies: readonly Policy[];
   holder: string | null;
   balance: bigint | null;
+  /** The authenticated registry, and the current time (unix seconds) for its listing delay. */
+  endpoints: readonly Endpoint[];
+  now: number;
 }
 
 export type FormErrors = Partial<Record<keyof PolicyFormState, string>>;
@@ -43,9 +45,35 @@ export interface PolicyDraft {
 const CAP_TEXT: Record<CapName, string> = {
   policy: "the per-policy cap (10% of pool depth)",
   utilization: "the pool utilization cap (80%)",
-  host: "the per-domain cap (20% of pool depth across all subdomains)",
+  host: "the per-provider cap (20% of pool depth across all of a provider's domains)",
   holder: "your per-holder cap (20% of pool depth)",
 };
+
+export type Insurability =
+  | { state: "insurable" }
+  | { state: "activating"; at: number }
+  | { state: "delisted" }
+  | { state: "no-references"; have: number };
+
+/** Why an endpoint can or cannot be insured right now (mirrors the checks at the top of `create_policy`). */
+export function insurability(e: Endpoint, all: readonly Endpoint[], now: number): Insurability {
+  if (e.status !== "LISTED") return { state: "delisted" };
+  if (now < e.insurableFrom) return { state: "activating", at: e.insurableFrom };
+  const have = referencesFor(e, all, now).length;
+  if (have < MIN_REFERENCES) return { state: "no-references", have };
+  return { state: "insurable" };
+}
+
+function endpointProblem(e: Endpoint | undefined, all: readonly Endpoint[], now: number): string | null {
+  if (!e) return "Choose an endpoint from the authenticated registry";
+  const i = insurability(e, all, now);
+  switch (i.state) {
+    case "delisted": return "This endpoint has been delisted";
+    case "activating": return "This listing is still inside its 24 h authentication delay";
+    case "no-references": return `Only ${i.have} independent reference providers are listed on this chain (${MIN_REFERENCES} required)`;
+    default: return null;
+  }
+}
 
 function int(s: string): number | null {
   return /^\d+$/.test(s.trim()) ? Number(s.trim()) : null;
@@ -56,15 +84,11 @@ export function draftPolicy(form: PolicyFormState, ctx: FormContext): PolicyDraf
   const errors: FormErrors = {};
   const tier = SLA_TIERS.find((t) => t.id === form.tier) ?? SLA_TIERS[0];
 
-  const urlError = form.url === "" ? null : validateEndpointUrl(form.url.trim() === form.url ? form.url : form.url);
-  if (form.url === "") errors.url = undefined;
-  else if (urlError) errors.url = urlError;
-  const urlOk = form.url !== "" && urlError === null;
-
-  const latency = int(form.maxLatencyMs);
-  if (latency === null || latency < LIMITS.minLatencyMs || latency > LIMITS.maxLatencyMs) {
-    errors.maxLatencyMs = `Enter ${LIMITS.minLatencyMs}–${LIMITS.maxLatencyMs.toLocaleString("en-US")} ms`;
-  }
+  const endpoint = ctx.endpoints.find((e) => e.id === form.endpointId);
+  const endpointError = endpointProblem(endpoint, ctx.endpoints, ctx.now);
+  if (form.endpointId === "") errors.endpointId = undefined;
+  else if (endpointError) errors.endpointId = endpointError;
+  const endpointOk = endpoint !== undefined && endpointError === null;
 
   const days = Number(form.days);
   const blocks = Number.isFinite(days) && form.days.trim() !== "" ? daysToBlocks(days) : NaN;
@@ -74,8 +98,7 @@ export function draftPolicy(form: PolicyFormState, ctx: FormContext): PolicyDraf
   const intervalBlocks = minutes === null ? NaN : minutes * 5;
   if (!(intervalBlocks >= LIMITS.minIntervalBlocks && intervalBlocks <= LIMITS.maxIntervalBlocks)) errors.intervalMinutes = "Probe interval must be 1–1440 minutes";
 
-  const host = urlOk ? hostnameOf(form.url) : "";
-  const exposure = host ? exposureFor(ctx.policies, host, ctx.holder ?? "") : { host: 0n, holder: 0n };
+  const exposure = endpointOk ? exposureFor(ctx.policies, endpoint.host, ctx.holder ?? "") : { host: 0n, holder: 0n };
   const limits = ctx.tvl > 0n
     ? coverageLimits({ tvl: ctx.tvl, lockedCoverage: ctx.lockedCoverage, hostExposure: exposure.host, holderExposure: exposure.holder })
     : null;
@@ -96,12 +119,12 @@ export function draftPolicy(form: PolicyFormState, ctx: FormContext): PolicyDraf
   if (premium !== null && ctx.balance !== null && premium > ctx.balance) errors.coverage ??= "Your wallet balance cannot cover the premium";
 
   const clean = Object.fromEntries(Object.entries(errors).filter(([, v]) => v)) as FormErrors;
-  const valid = urlOk && Object.keys(clean).length === 0 && coverage !== null && premium !== null && latency !== null;
+  const valid = endpointOk && Object.keys(clean).length === 0 && coverage !== null && premium !== null;
   return {
     args: valid
       ? {
-          endpointUrl: form.url, maxLatencyMs: latency!, coverage: coverage!, durationBlocks: blocks,
-          minUptimeBps: tier.uptimeBps, probeIntervalBlocks: intervalBlocks, probeMode: form.mode,
+          endpointId: form.endpointId, coverage: coverage!, durationBlocks: blocks,
+          minUptimeBps: tier.uptimeBps, probeIntervalBlocks: intervalBlocks,
         }
       : null,
     premium,

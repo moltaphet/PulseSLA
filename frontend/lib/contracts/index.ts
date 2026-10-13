@@ -1,10 +1,10 @@
 /**
- * The deployed PulseSLA contract. `deployment.json` and `abi.json` are written by
- * `python -m scripts.deploy`; NEXT_PUBLIC_PULSESLA_ADDRESS overrides the address
- * per environment.
+ * The deployed PulseSLA contract. `generated/deployment.json` and `generated/abi.json`
+ * are written by `python -m scripts.deploy`; NEXT_PUBLIC_PULSESLA_ADDRESS overrides
+ * the address per environment. With no address the app runs in demo mode.
  */
-import abiJson from "./abi.json";
-import deploymentJson from "./deployment.json";
+import abiJson from "../generated/abi.json";
+import deploymentJson from "../generated/deployment.json";
 
 export interface AbiMethod {
   name: string;

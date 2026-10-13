@@ -19,6 +19,7 @@ export class DemoClient implements ProtocolClient {
 
   async getPoolMetrics() { return this.sim.metrics(); }
   async getUnderwriter(address: string) { return this.sim.underwriter(address.toLowerCase()); }
+  async listEndpoints() { return this.sim.registry.map((e) => ({ ...e })); }
   async listPolicies() { return this.sim.policies.map((p) => ({ ...p })); }
   async getIncidents() { return this.sim.incidents.map((i) => ({ ...i })); }
   async quotePremium(coverage: bigint, durationBlocks: number, uptime: number) { return this.sim.quote(coverage, durationBlocks, uptime); }
@@ -38,13 +39,18 @@ export class DemoClient implements ProtocolClient {
   triggerProbe(sender: string, policyId: number, bond: bigint) {
     return this.tx(`Probe policy #${policyId}`, () => this.sim.triggerProbe(sender, policyId, bond), (r) => ({
       votes: r.votes,
-      outcome: { ok: r.ok, reason: r.reason, breachStaged: r.breachStaged },
+      outcome: { ok: r.ok, verdict: r.verdict, reason: r.reason, breachStaged: r.breachStaged },
     }));
   }
   settleClaim(sender: string, policyId: number, bond: bigint) {
     return this.tx(`Settle claim on policy #${policyId}`, () => this.sim.settleClaim(sender, policyId, bond), (r) => ({
       votes: r.votes,
-      outcome: { paid: r.paid, payout: r.payout, reason: r.reason },
+      outcome: { confirmed: r.confirmed, payout: r.payout, reason: r.reason },
+    }));
+  }
+  releasePayout(sender: string, policyId: number) {
+    return this.tx(`Release payout on policy #${policyId}`, () => this.sim.releasePayout(sender, policyId), (r) => ({
+      outcome: { released: r.released, payout: r.payout },
     }));
   }
   expirePolicy(_sender: string, policyId: number) { return this.tx(`Expire policy #${policyId}`, () => this.sim.expirePolicy(policyId)); }

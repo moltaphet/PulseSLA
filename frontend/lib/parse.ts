@@ -1,6 +1,6 @@
 /** Normalise chain responses (genlayer-js may return Map / object / string-encoded JSON) into typed models. */
 import type {
-  Incident, IncidentKind, Policy, PolicyStatus, PoolMetrics, ProbeMode, ProbeReason, UnderwriterPosition,
+  Endpoint, Incident, IncidentKind, Policy, PolicyStatus, PoolMetrics, ProbeReason, UnderwriterPosition, Verdict,
 } from "./types";
 
 export function toRecord(raw: unknown): Record<string, unknown> {
@@ -39,12 +39,14 @@ export function parsePoolMetrics(raw: unknown): PoolMetrics {
   const r = toRecord(raw);
   return {
     tvl: big(r.tvl),
-    // Older deployments predate net-asset pricing: derive it.
     netAssets: r.net_assets !== undefined ? big(r.net_assets) : big(r.tvl) - big(r.reserved_payouts),
     totalShares: big(r.total_shares),
     sharePrice: big(r.share_price),
     lockedCoverage: big(r.locked_coverage),
     reservedPayouts: big(r.reserved_payouts),
+    owedPayouts: big(r.owed_payouts),
+    stagedClaims: big(r.staged_claims),
+    listedEndpoints: num(r.listed_endpoints),
     freeLiquidity: big(r.free_liquidity),
     utilizationBps: num(r.utilization_bps),
     apyBps: num(r.apy_bps),
@@ -70,7 +72,7 @@ export function parseUnderwriter(raw: unknown): UnderwriterPosition {
   return { shares: big(r.shares), value: big(r.value), withdrawable: big(r.withdrawable) };
 }
 
-const STATUSES: readonly PolicyStatus[] = ["ACTIVE", "BREACH_PENDING", "PAID", "EXPIRED", "LAPSED"];
+const STATUSES: readonly PolicyStatus[] = ["ACTIVE", "BREACH_PENDING", "VESTING", "PAID", "EXPIRED", "LAPSED"];
 
 export function parsePolicy(raw: unknown): Policy {
   const r = toRecord(raw);
@@ -78,11 +80,11 @@ export function parsePolicy(raw: unknown): Policy {
   return {
     id: num(r.id),
     holder: str(r.holder).toLowerCase(),
+    endpointId: str(r.endpoint_id),
     endpointUrl: str(r.endpoint_url),
     host: str(r.host),
     apex: str(r.apex) || str(r.host),
-    probeMode: (str(r.probe_mode) === "http" ? "http" : "rpc") as ProbeMode,
-    maxLatencyMs: num(r.max_latency_ms),
+    chainId: num(r.chain_id),
     minUptimeBps: num(r.min_uptime_bps),
     probeInterval: num(r.probe_interval),
     coverage: big(r.coverage),
@@ -94,22 +96,52 @@ export function parsePolicy(raw: unknown): Policy {
     samplesTotal: num(r.samples_total),
     samplesOk: num(r.samples_ok),
     uptimeBps: num(r.uptime_bps),
+    inconclusiveRounds: num(r.inconclusive_rounds),
+    downtimeSecs: num(r.downtime_secs),
     consecutiveFailures: num(r.consecutive_failures),
+    outageStartedAt: num(r.outage_started_at),
+    outageBlocks: num(r.outage_blocks),
     baselineOk: r.baseline_ok === true,
     lastProbeAt: num(r.last_probe_at),
     lastBlock: num(r.last_block),
-    lastLatencyMs: num(r.last_latency_ms),
+    lastRefHead: num(r.last_ref_head),
     lastReason: str(r.last_reason) as ProbeReason | "",
     lastOk: r.last_ok === true,
     settleAt: num(r.settle_at),
     claimCount: num(r.claim_count),
     payout: big(r.payout),
+    released: big(r.released),
+    releasable: big(r.releasable),
+    vestStart: num(r.vest_start),
   };
 }
 
+export function parseEndpoint(raw: unknown): Endpoint {
+  const r = toRecord(raw);
+  return {
+    id: str(r.endpoint_id),
+    provider: str(r.provider),
+    domain: str(r.domain),
+    url: str(r.url),
+    host: str(r.host),
+    apex: str(r.apex) || str(r.host),
+    chainId: num(r.chain_id),
+    attestation: str(r.attestation),
+    listedAt: num(r.listed_at),
+    insurableFrom: num(r.insurable_from),
+    status: str(r.status) === "DELISTED" ? "DELISTED" : "LISTED",
+  };
+}
+
+export function parseEndpoints(raw: unknown): Endpoint[] {
+  return (Array.isArray(raw) ? raw : []).map(parseEndpoint).filter((e) => e.id !== "");
+}
+
 const KINDS: readonly IncidentKind[] = [
-  "POLICY_CREATED", "PROBE", "BREACH_CONFIRMED", "CLAIM_DISMISSED", "PAYOUT", "POLICY_EXPIRED", "CLAIM_LAPSED",
+  "POLICY_CREATED", "PROBE", "BREACH_STAGED", "BREACH_CONFIRMED_VESTING", "CLAIM_DISMISSED", "PAYOUT_RELEASED",
+  "POLICY_EXPIRED", "CLAIM_LAPSED", "ENDPOINT_LISTED", "ENDPOINT_DELISTED", "GOVERNOR_CHANGED",
 ];
+const VERDICTS: readonly Verdict[] = ["HEALTHY", "FAILING", "INCONCLUSIVE"];
 
 /** Incidents are stored on-chain as JSON strings. */
 export function parseIncident(raw: unknown): Incident | null {
@@ -126,10 +158,14 @@ export function parseIncident(raw: unknown): Incident | null {
   };
   if (typeof r.ok === "boolean") {
     inc.ok = r.ok;
+    const verdict = str(r.verdict) as Verdict;
+    inc.verdict = VERDICTS.includes(verdict) ? verdict : r.ok ? "HEALTHY" : "FAILING";
     inc.reason = str(r.reason) as ProbeReason;
     inc.status = num(r.status);
-    inc.latencyMs = num(r.latency_ms);
     inc.block = num(r.block);
+    inc.refHead = num(r.ref_head);
+    inc.refsOk = num(r.refs_ok);
+    inc.refsTotal = num(r.refs_total);
   }
   return inc;
 }

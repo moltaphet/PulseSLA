@@ -3,8 +3,11 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useProtocol } from "@/lib/hooks/useProtocol";
-import { DEFAULT_FORM, draftPolicy, type PolicyFormState } from "@/lib/policyForm";
-import { BREACH_CONSECUTIVE, PAYOUT_FLOOR_BPS, PAYOUT_RAMP_SECONDS, SLA_TIERS } from "@/lib/pricing";
+import { DEFAULT_FORM, draftPolicy, insurability, type PolicyFormState } from "@/lib/policyForm";
+import {
+  BREACH_CONSECUTIVE, MIN_OUTAGE_BLOCKS, MIN_OUTAGE_SECS, MIN_REFERENCES, PAYOUT_COOLDOWN_SECS, PAYOUT_FLOOR_BPS, PAYOUT_RAMP_SECONDS,
+  PAYOUT_VEST_SECS, SLA_TIERS,
+} from "@/lib/pricing";
 import { formatBps, formatDuration, formatGen } from "@/lib/units";
 import { Button, Card, Field, Pill, Row } from "./ui";
 
@@ -12,14 +15,14 @@ const DURATIONS = [7, 30, 90, 180, 365];
 const INTERVALS = [1, 5, 15, 60, 360];
 
 export function PolicyMarketplace() {
-  const { metrics, policies, account, balance, canTransact, createPolicy, tx } = useProtocol();
+  const { metrics, endpoints, policies, account, balance, canTransact, createPolicy, tx, now } = useProtocol();
   const [form, setForm] = useState<PolicyFormState>(DEFAULT_FORM);
   const [minted, setMinted] = useState<number | null>(null);
   const set = <K extends keyof PolicyFormState>(k: K, v: PolicyFormState[K]) => { setForm((f) => ({ ...f, [k]: v })); setMinted(null); };
 
   const draft = useMemo(
-    () => draftPolicy(form, { tvl: metrics?.tvl ?? 0n, lockedCoverage: metrics?.lockedCoverage ?? 0n, policies, holder: account, balance }),
-    [form, metrics, policies, account, balance],
+    () => draftPolicy(form, { tvl: metrics?.tvl ?? 0n, lockedCoverage: metrics?.lockedCoverage ?? 0n, policies, holder: account, balance, endpoints, now }),
+    [form, metrics, policies, account, balance, endpoints, now],
   );
   const tier = SLA_TIERS.find((t) => t.id === form.tier) ?? SLA_TIERS[0];
   const busy = tx.phase === "pending";
@@ -35,7 +38,7 @@ export function PolicyMarketplace() {
       <div>
         <h1 className="text-3xl font-bold tracking-tight text-white">Policy marketplace</h1>
         <p className="mt-1 max-w-3xl text-sm text-muted">
-          Insure an RPC node, indexer, bridge relay or sequencer. Validators probe the endpoint independently; if it breaches your SLA the payout is released automatically.
+          Insure a public provider endpoint from the authenticated registry. Validators measure it against independent reference providers; a corroborated, continuous outage stages a claim and the payout then vests out to the holder.
         </p>
       </div>
 
@@ -49,21 +52,42 @@ export function PolicyMarketplace() {
       <form onSubmit={(e) => { e.preventDefault(); void submit(); }} className="grid gap-6 lg:grid-cols-5">
         <Card className="space-y-5 lg:col-span-3" title="Define your SLA">
           <div className="space-y-5">
-            <Field id="endpoint" label="Endpoint URL" type="url" placeholder="https://rpc.your-node.io" autoComplete="off" spellCheck={false}
-              value={form.url} onChange={(e) => set("url", e.target.value)} error={draft.errors.url}
-              hint="Public http(s) endpoint. Private, loopback and credentialed URLs are rejected on-chain." />
-
             <fieldset>
-              <legend className="mb-1.5 text-xs font-medium uppercase tracking-wider text-zinc-400">Probe type</legend>
-              <div className="flex gap-2">
-                {([["rpc", "JSON-RPC", "eth_blockNumber: status, latency and block freshness"], ["http", "HTTP", "GET: status and latency only"]] as const).map(([v, label, hint]) => (
-                  <label key={v} className={`flex-1 cursor-pointer rounded-lg border px-4 py-3 text-sm ${form.mode === v ? "border-capital bg-capital-dim" : "border-line hover:border-faint"}`}>
-                    <input type="radio" name="mode" value={v} checked={form.mode === v} onChange={() => set("mode", v)} className="sr-only" />
-                    <span className="block font-semibold">{label}</span>
-                    <span className="mt-0.5 block text-xs text-muted">{hint}</span>
-                  </label>
-                ))}
-              </div>
+              <legend className="mb-1.5 text-xs font-medium uppercase tracking-wider text-zinc-400">Authenticated endpoint</legend>
+              {endpoints.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-line px-4 py-3 text-sm text-muted">
+                  The registry is empty. The governor has not listed any endpoints yet, so there is nothing to insure.
+                </p>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Authenticated endpoint">
+                  {endpoints.map((e) => {
+                    const ins = insurability(e, endpoints, now);
+                    const ok = ins.state === "insurable";
+                    const picked = form.endpointId === e.id;
+                    return (
+                      <label key={e.id} aria-disabled={!ok}
+                        className={`rounded-lg border px-4 py-3 ${ok ? "cursor-pointer" : "cursor-not-allowed opacity-60"} ${picked ? "border-pulse bg-pulse-dim" : "border-line hover:border-faint"}`}>
+                        <input type="radio" name="endpoint" value={e.id} checked={picked} disabled={!ok} onChange={() => set("endpointId", e.id)} className="sr-only" />
+                        <span className="flex items-baseline justify-between gap-2">
+                          <span className="text-sm font-semibold">{e.provider}</span>
+                          <Pill tone={ok ? "pulse" : ins.state === "activating" ? "capital" : "muted"}>
+                            {ok ? "Insurable" : ins.state === "activating" ? `in ${formatDuration(Math.max(0, ins.at - now))}` : ins.state === "delisted" ? "Delisted" : "No baseline"}
+                          </Pill>
+                        </span>
+                        <span className="num mt-1 block truncate text-xs text-muted">{e.host}</span>
+                        <span className="mt-0.5 block text-xs text-zinc-400">
+                          {e.id} · chain {e.chainId}
+                          {ins.state === "no-references" ? ` · only ${ins.have} reference providers` : ""}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+              {draft.errors.endpointId && <p role="alert" className="mt-1.5 text-xs text-danger">{draft.errors.endpointId}</p>}
+              <p className="mt-1.5 text-xs text-zinc-400">
+                Only endpoints the governor listed and the validators authenticated on-chain can be insured. A policy never takes a URL, so you cannot insure infrastructure you control.
+              </p>
             </fieldset>
 
             <fieldset>
@@ -82,15 +106,12 @@ export function PolicyMarketplace() {
               </div>
             </fieldset>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="latency" label="Max latency" inputMode="numeric" suffix="ms" value={form.maxLatencyMs} onChange={(e) => set("maxLatencyMs", e.target.value)} error={draft.errors.maxLatencyMs} />
-              <div>
-                <label htmlFor="interval" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400">Probe frequency</label>
-                <select id="interval" value={form.intervalMinutes} onChange={(e) => set("intervalMinutes", e.target.value)} className="num w-full rounded-lg border border-line bg-bg px-3 py-2.5 text-sm">
-                  {INTERVALS.map((m) => <option key={m} value={m}>every {formatDuration(m * 60)} (minimum gap)</option>)}
-                </select>
-                {draft.errors.intervalMinutes && <p role="alert" className="mt-1.5 text-xs text-danger">{draft.errors.intervalMinutes}</p>}
-              </div>
+            <div>
+              <label htmlFor="interval" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400">Probe frequency</label>
+              <select id="interval" value={form.intervalMinutes} onChange={(e) => set("intervalMinutes", e.target.value)} className="num w-full rounded-lg border border-line bg-bg px-3 py-2.5 text-sm">
+                {INTERVALS.map((m) => <option key={m} value={m}>every {formatDuration(m * 60)} (minimum gap)</option>)}
+              </select>
+              {draft.errors.intervalMinutes && <p role="alert" className="mt-1.5 text-xs text-danger">{draft.errors.intervalMinutes}</p>}
             </div>
 
             <Field id="coverage" label="Coverage amount" inputMode="decimal" suffix="GEN" placeholder="5.0" autoComplete="off" value={form.coverage} onChange={(e) => set("coverage", e.target.value)} error={draft.errors.coverage}
@@ -125,9 +146,10 @@ export function PolicyMarketplace() {
               {balance !== null && draft.premium !== null && balance >= draft.premium && <Row label="After purchase">{formatGen(balance - draft.premium)} GEN</Row>}
             </dl>
             <ul className="mt-4 space-y-2 border-t border-line pt-3 text-xs text-muted">
-              <li><span className="font-semibold text-ink">Breach rule · </span>{BREACH_CONSECUTIVE} consecutive failing probes (status ≠ 200, latency over limit, or frozen block) with uptime below {tier.uptimeLabel} stage a claim.</li>
-              <li><span className="font-semibold text-ink">Grace period · </span>{formatDuration(metrics?.claimGrace ?? 0)}, then a second validator round re-verifies before paying.</li>
-              <li><span className="font-semibold text-ink">Vesting · </span>payout starts at {formatBps(PAYOUT_FLOOR_BPS, 0)} of coverage and reaches 100% after {formatDuration(PAYOUT_RAMP_SECONDS)} — anti-collusion.</li>
+              <li><span className="font-semibold text-ink">Corroboration · </span>every round also probes ≥ {MIN_REFERENCES} independent providers on the same chain. A failure only counts while most of them are healthy, so an observer-side or network-wide outage is never attributed to the provider.</li>
+              <li><span className="font-semibold text-ink">Breach rule · </span>{BREACH_CONSECUTIVE} consecutive corroborated failures spanning ≥ {formatDuration(MIN_OUTAGE_SECS)} and ≥ {MIN_OUTAGE_BLOCKS} chain blocks, with uptime below {tier.uptimeLabel}, stage a claim. Rate limiting (HTTP 429) is inconclusive.</li>
+              <li><span className="font-semibold text-ink">Grace period · </span>{formatDuration(metrics?.claimGrace ?? 0)}, then a fresh corroborated round re-verifies before the breach is confirmed.</li>
+              <li><span className="font-semibold text-ink">Vesting · </span>the payout starts at {formatBps(PAYOUT_FLOOR_BPS, 0)} of coverage and reaches 100% after {formatDuration(PAYOUT_RAMP_SECONDS)} of policy age, then is released after a {formatDuration(PAYOUT_COOLDOWN_SECS)} cooldown, streaming over {formatDuration(PAYOUT_VEST_SECS)}.</li>
               <li><span className="font-semibold text-ink">Baseline · </span>cover applies once the endpoint has been observed healthy.</li>
             </ul>
             <Button type="submit" className="mt-5 w-full" loading={busy} disabled={!draft.valid || !canTransact}>

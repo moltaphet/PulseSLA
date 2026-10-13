@@ -21,7 +21,7 @@ export function makeDemoUnfrozen(): DemoClient {
   c.advance(7200); // past the claim grace period
   c.sim.settleClaim(DEMO_ACCOUNT, 3, c.sim.cfg.probeBond);
   c.sim.setEndpoint("rpc.helios-node.io", "healthy");
-  if (c.sim.metrics().reservedPayouts !== 0n) throw new Error("demo world still has reserved claims");
+  if (c.sim.metrics().stagedClaims !== 0n) throw new Error("demo world still has staged claims");
   return c;
 }
 

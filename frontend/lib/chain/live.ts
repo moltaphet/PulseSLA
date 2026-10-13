@@ -1,7 +1,7 @@
 import { CHAIN_ID, RPC_URL } from "../config";
-import { parseIncidents, parsePolicies, parsePolicy, parsePoolMetrics, parseUnderwriter, big } from "../parse";
+import { parseEndpoints, parseIncidents, parsePolicies, parsePolicy, parsePoolMetrics, parseUnderwriter, big } from "../parse";
 import type {
-  ConsensusVote, CreatePolicyArgs, Incident, Policy, PoolMetrics, TxReceipt, UnderwriterPosition,
+  ConsensusVote, CreatePolicyArgs, Endpoint, Incident, Policy, PoolMetrics, TxReceipt, UnderwriterPosition,
 } from "../types";
 import type { ProtocolClient } from "./client";
 
@@ -84,6 +84,16 @@ export class LiveClient implements ProtocolClient {
   async getPoolMetrics(): Promise<PoolMetrics> { return parsePoolMetrics(await this.read("get_pool_metrics")); }
   async getUnderwriter(address: string): Promise<UnderwriterPosition> { return parseUnderwriter(await this.read("get_underwriter", [address.toLowerCase()])); }
 
+  async listEndpoints(): Promise<Endpoint[]> {
+    const out: Endpoint[] = [];
+    for (let offset = 0; ; offset += PAGE) {
+      const page = parseEndpoints(await this.read("list_endpoints", [offset, PAGE]));
+      out.push(...page);
+      if (page.length < PAGE) break;
+    }
+    return out;
+  }
+
   async listPolicies(): Promise<Policy[]> {
     const count = Number(big(await this.read("get_policy_count")));
     const out: Policy[] = [];
@@ -128,7 +138,7 @@ export class LiveClient implements ProtocolClient {
   withdraw(sender: string, amount: bigint) { return this.write(sender, "withdraw_underwriting", [amount], "Withdraw underwriting capital"); }
   createPolicy(sender: string, a: CreatePolicyArgs, premium: bigint) {
     return this.write(sender, "create_policy",
-      [a.endpointUrl, a.maxLatencyMs, a.coverage, a.durationBlocks, a.minUptimeBps, a.probeIntervalBlocks, a.probeMode],
+      [a.endpointId, a.coverage, a.durationBlocks, a.minUptimeBps, a.probeIntervalBlocks],
       "Mint SLA policy", premium);
   }
 
@@ -136,13 +146,28 @@ export class LiveClient implements ProtocolClient {
     const receipt = await this.write(sender, "trigger_probe", [policyId], `Probe policy #${policyId}`, bond);
     // The transaction's return value is awkward to decode across SDK versions; the chain state it wrote is not.
     const p = parsePolicy(await this.read("get_policy_status", [policyId]));
-    return { ...receipt, outcome: { ok: p.lastOk, reason: p.lastReason, breachStaged: p.status === "BREACH_PENDING" } };
+    return {
+      ...receipt,
+      outcome: {
+        ok: p.lastOk,
+        verdict: p.lastOk ? "HEALTHY" : p.lastReason === "NO_BASELINE" || p.lastReason === "RATE_LIMITED" ? "INCONCLUSIVE" : "FAILING",
+        reason: p.lastReason,
+        breachStaged: p.status === "BREACH_PENDING",
+      },
+    };
   }
 
   async settleClaim(sender: string, policyId: number, bond: bigint): Promise<TxReceipt> {
     const receipt = await this.write(sender, "settle_claim", [policyId], `Settle claim on policy #${policyId}`, bond);
     const p = parsePolicy(await this.read("get_policy_status", [policyId]));
-    return { ...receipt, outcome: { paid: p.status === "PAID", payout: p.payout, reason: p.lastReason } };
+    return { ...receipt, outcome: { confirmed: p.status === "VESTING" || p.status === "PAID", payout: p.payout, reason: p.lastReason } };
+  }
+
+  async releasePayout(sender: string, policyId: number): Promise<TxReceipt> {
+    const before = parsePolicy(await this.read("get_policy_status", [policyId]));
+    const receipt = await this.write(sender, "release_payout", [policyId], `Release payout on policy #${policyId}`);
+    const after = parsePolicy(await this.read("get_policy_status", [policyId]));
+    return { ...receipt, outcome: { released: after.released - before.released, payout: after.payout } };
   }
 
   expirePolicy(sender: string, policyId: number) { return this.write(sender, "expire_policy", [policyId], `Expire policy #${policyId}`); }

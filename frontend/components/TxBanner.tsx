@@ -20,9 +20,11 @@ export function TxBanner() {
     const { votes, outcome } = tx.receipt;
     const parts: string[] = [];
     if (votes?.length) parts.push(`${votes.filter((v) => v.agree).length}/${votes.length} validators agreed`);
-    if (outcome?.paid) parts.push(`payout ${formatGen(outcome.payout ?? 0n)} GEN released`);
-    else if (outcome?.paid === false) parts.push("claim dismissed: endpoint recovered");
-    else if (outcome?.breachStaged) parts.push("breach confirmed — claim staged");
+    if (outcome?.released !== undefined) parts.push(`${formatGen(outcome.released)} GEN released to the holder`);
+    else if (outcome?.confirmed) parts.push(`breach confirmed — ${formatGen(outcome.payout ?? 0n)} GEN payout now vesting`);
+    else if (outcome?.confirmed === false) parts.push("claim dismissed: endpoint recovered");
+    else if (outcome?.breachStaged) parts.push("corroborated outage — claim staged");
+    else if (outcome?.verdict === "INCONCLUSIVE") parts.push("round not corroborated — no change, bond refunded");
     else if (outcome?.ok !== undefined) parts.push(outcome.ok ? "endpoint healthy" : `endpoint failing (${(outcome.reason ?? "").toLowerCase().replace(/_/g, " ")})`);
     body = parts.length ? parts.join(" · ") : "Confirmed";
   }

@@ -68,6 +68,16 @@ describe("LiveClient reads", () => {
     expect(calls.find((x) => x.fn === "readContract")!.arg.args).toEqual(["0xabcdef"]);
   });
 
+  it("reads the authenticated registry", async () => {
+    reads.list_endpoints = [
+      { endpoint_id: "alpha", provider: "Alpha", domain: "node-alpha.io", url: "https://rpc.node-alpha.io", host: "rpc.node-alpha.io", apex: "node-alpha.io", chain_id: 1, status: "LISTED", listed_at: 5, insurable_from: 86_405 },
+    ];
+    const eps = await new LiveClient(ADDR, null).listEndpoints();
+    expect(eps).toHaveLength(1);
+    expect(eps[0]).toMatchObject({ id: "alpha", chainId: 1, insurableFrom: 86_405, status: "LISTED" });
+    expect(calls.find((x) => x.arg.functionName === "list_endpoints")!.arg.args).toEqual([0, 50]);
+  });
+
   it("pages policies and incidents", async () => {
     reads.get_policy_count = 3;
     reads.list_policies = [{ id: 1 }, { id: 2 }, { id: 3 }];
@@ -101,13 +111,20 @@ describe("LiveClient writes", () => {
     expect(signer).toMatchObject({ account: ME, provider });
   });
 
-  it("encodes create_policy arguments in contract order", async () => {
+  it("encodes create_policy arguments in contract order: a registry id, never a URL", async () => {
     await new LiveClient(ADDR, provider).createPolicy(ME, {
-      endpointUrl: "https://x.io", maxLatencyMs: 500, coverage: ATTO, durationBlocks: 7200, minUptimeBps: 9990, probeIntervalBlocks: 25, probeMode: "rpc",
+      endpointId: "alpha", coverage: ATTO, durationBlocks: 7200, minUptimeBps: 9990, probeIntervalBlocks: 25,
     }, 99n);
     expect(calls.find((x) => x.fn === "writeContract")!.arg).toMatchObject({
-      functionName: "create_policy", args: ["https://x.io", 500, ATTO, 7200, 9990, 25, "rpc"], value: 99n,
+      functionName: "create_policy", args: ["alpha", ATTO, 7200, 9990, 25], value: 99n,
     });
+  });
+
+  it("sends release_payout for a policy and reports what was released", async () => {
+    reads.get_policy_status = { id: 4, status: "VESTING", payout: "100", released: "40" };
+    const r = await new LiveClient(ADDR, provider).releasePayout(ME, 4);
+    expect(calls.find((x) => x.fn === "writeContract")!.arg).toMatchObject({ functionName: "release_payout", args: [4], value: 0n });
+    expect(r.outcome).toMatchObject({ payout: 100n });
   });
 
   it("refuses to write without a wallet", async () => {
@@ -125,9 +142,11 @@ describe("LiveClient writes", () => {
   it("derives probe and settle outcomes from the chain state the transaction wrote", async () => {
     reads.get_policy_status = { id: 1, status: "BREACH_PENDING", last_ok: false, last_reason: "HTTP_ERROR", coverage: "5", payout: "0" };
     const c = new LiveClient(ADDR, provider);
-    expect((await c.triggerProbe(ME, 1, 10n)).outcome).toEqual({ ok: false, reason: "HTTP_ERROR", breachStaged: true });
-    reads.get_policy_status = { id: 1, status: "PAID", last_ok: false, last_reason: "UNREACHABLE", payout: "4" };
-    expect((await c.settleClaim(ME, 1, 10n)).outcome).toMatchObject({ paid: true, payout: 4n, reason: "UNREACHABLE" });
+    expect((await c.triggerProbe(ME, 1, 10n)).outcome).toEqual({ ok: false, verdict: "FAILING", reason: "HTTP_ERROR", breachStaged: true });
+    reads.get_policy_status = { id: 1, status: "ACTIVE", last_ok: false, last_reason: "NO_BASELINE" };
+    expect((await c.triggerProbe(ME, 1, 10n)).outcome).toMatchObject({ verdict: "INCONCLUSIVE", breachStaged: false });
+    reads.get_policy_status = { id: 1, status: "VESTING", last_ok: false, last_reason: "UNREACHABLE", payout: "4" };
+    expect((await c.settleClaim(ME, 1, 10n)).outcome).toMatchObject({ confirmed: true, payout: 4n, reason: "UNREACHABLE" });
   });
 });
 

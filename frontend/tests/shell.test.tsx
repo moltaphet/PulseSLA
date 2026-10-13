@@ -135,6 +135,8 @@ describe("AppShell", () => {
     const select = screen.getByLabelText("Health of rpc.helios-node.io");
     await user.selectOptions(select, "http502");
     expect(client.sim.endpoints.get("rpc.helios-node.io")?.mode).toBe("http502");
+    expect(within(select).getByRole("option", { name: "Rate limited (429)" })).toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: /latency/i })).not.toBeInTheDocument();
     const before = client.now;
     await user.click(screen.getByRole("button", { name: "+1 h" }));
     expect(client.now).toBe(before + 3600);
