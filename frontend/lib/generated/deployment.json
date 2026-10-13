@@ -1,13 +1,16 @@
 {
   "network": "studio-next",
   "rpc_url": "https://studio-next.genlayer.com/api",
-  "contract_address": null,
+  "contract_address": "0x22119E501A483a9FF833bBf42d5C259Ee9B21E11",
   "source": "contracts/uptime_sla.py",
-  "source_sha256": null,
+  "source_sha256": "4215e3044ef81706b186b3ca726a1f6e7091677e05bc349f3522ce195c8008b3",
   "constructor_args": {
     "activation_delay_secs": 60,
     "claim_grace_secs": 300,
     "probe_bond": "10000000000000000"
   },
-  "note": "v0.4.0 is not deployed yet: run scripts/deploy.py. The previous v0.3.0 record is kept in deployments/studio-next.json."
+  "deployed_at": 1791899581,
+  "deploy_tx": "0x015c19040009200d795618272b7b3b97eee3c745b7125ead4241af216db03caa",
+  "deployer": "0xc4DE3314A337aD0e3FbeE269f65cD7D6607DfE2B",
+  "explorer_url": "https://explorer-studio-next.genlayer.com/address/0x22119E501A483a9FF833bBf42d5C259Ee9B21E11"
 }

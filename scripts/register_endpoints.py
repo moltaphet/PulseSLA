@@ -36,9 +36,12 @@ CHAIN_ID = 1
 PROVIDERS = [
     ("publicnode-eth", "PublicNode", "publicnode.com", "https://ethereum-rpc.publicnode.com"),
     ("cloudflare-eth", "Cloudflare", "cloudflare-eth.com", "https://cloudflare-eth.com"),
-    ("onerpc-eth", "1RPC", "1rpc.io", "https://1rpc.io/eth"),
     ("drpc-eth", "dRPC", "drpc.org", "https://eth.drpc.org"),
+    ("tenderly-eth", "Tenderly", "tenderly.co", "https://mainnet.gateway.tenderly.co"),
+    ("flashbots-eth", "Flashbots", "flashbots.net", "https://rpc.flashbots.net"),
 ]
+# Tried and rejected: 1RPC (https://1rpc.io/eth) answered from a developer machine but the Studio Next validators
+# did not reach consensus on its eth_chainId (MAJORITY_DISAGREE), so it is not a usable listing there.
 
 
 def attestation(endpoint_id: str, provider: str, domain: str, chain_id: int, url: str) -> str:

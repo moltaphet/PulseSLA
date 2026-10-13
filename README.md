@@ -8,10 +8,12 @@ PulseSLA is parametric downtime insurance for Web3 infrastructure: public RPC pr
 |---|---|
 | **Network** | GenLayer Studio Next, chain ID `61997` |
 | **Source** | [`contracts/uptime_sla.py`](contracts/uptime_sla.py) (v0.4.0), GenVM runner `py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng` |
-| **Previous deployment** | [`0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8`](https://explorer-studio-next.genlayer.com/address/0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8): the pre-registry build (v0.3.0), **superseded by this source and not a deployment of it** |
-| **Records** | [`deployments/studio-next.json`](deployments/studio-next.json), [`deployments/studio-next-verification.json`](deployments/studio-next-verification.json): both describe the previous build |
+| **Contract** | [`0x22119E501A483a9FF833bBf42d5C259Ee9B21E11`](https://explorer-studio-next.genlayer.com/address/0x22119E501A483a9FF833bBf42d5C259Ee9B21E11), v0.4.0, deployed 2026-10-13 with a 60 s activation delay, 300 s claim grace and 0.01 GEN probe bond |
+| **Registry** | five listings: `publicnode-eth`, `cloudflare-eth`, `drpc-eth`, `tenderly-eth`, `flashbots-eth` (Ethereum mainnet, chain 1). Each was authenticated by consensus `eth_chainId`. They become insurable 24 h after listing |
+| **Previous deployment** | [`0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8`](https://explorer-studio-next.genlayer.com/address/0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8): the pre-registry build (v0.3.0), superseded |
+| **Records** | [`deployments/studio-next.json`](deployments/studio-next.json) describes the v0.4.0 deployment. [`deployments/studio-next-verification.json`](deployments/studio-next-verification.json) is the **v0.3.0** live verification and does not cover v0.4.0 |
 
-> **v0.4.0: authenticated-infrastructure build.** This revision answers the hackathon steward's rejection ("a policyholder can insure an endpoint they control, choose the observations that establish a breach, and receive a vested payout without any independent proof"). See [§3 Authenticated Infrastructure & Exploit Mitigation](#3-authenticated-infrastructure--exploit-mitigation). It **has not been deployed yet**: the address above is the earlier build, and the dashboard in `frontend/` still speaks the earlier ABI (see [§6](#6-verification-what-is-proven-and-what-is-not)).
+> **v0.4.0: authenticated-infrastructure build.** This revision answers the hackathon steward's rejection ("a policyholder can insure an endpoint they control, choose the observations that establish a breach, and receive a vested payout without any independent proof"). See [§3 Authenticated Infrastructure & Exploit Mitigation](#3-authenticated-infrastructure--exploit-mitigation). It is deployed to Studio Next (above) and the dashboard in `frontend/` has been migrated to the new ABI. See [§6](#6-verification-what-is-proven-and-what-is-not) for what has and has not been exercised live.
 >
 > **Breaking changes.** `create_policy(endpoint_id, coverage_amount, duration_blocks, min_uptime_bps, probe_interval_blocks)` replaces the URL/latency/mode signature. `max_latency_ms` and `http` probe mode are gone ([§7](#7-clock-and-latency-transparency)). `settle_claim` now *confirms* a breach and starts vesting; the new `release_payout` pays it out.
 
@@ -110,7 +112,7 @@ A listing is **authenticated** because of five independent bindings, each checke
 4. **Live chain authentication.** At listing, a consensus `eth_chainId` call must return the declared chain id. An endpoint that serves a different chain, is unreachable, or returns garbage is rejected.
 5. **Immutability.** Listings never change after being written; policies snapshot the listing. `delist_endpoint` only stops *new* policies and removes the listing from the reference set.
 
-Endpoints are **public, keyless** JSON-RPC URLs. An API key in a URL is a secret and must never go on-chain; it would also make "the insured endpoint" a per-customer resource. The default manifest (`scripts/register_endpoints.py`) lists PublicNode, Cloudflare, 1RPC and dRPC for Ethereum mainnet, which answered `eth_chainId = 0x1` without a key when this revision was written. Infura, Alchemy and Ankr require an API key for mainnet, so they can be listed only if they expose a keyless gateway.
+Endpoints are **public, keyless** JSON-RPC URLs. An API key in a URL is a secret and must never go on-chain; it would also make "the insured endpoint" a per-customer resource. The default manifest (`scripts/register_endpoints.py`) lists PublicNode, Cloudflare, dRPC, Tenderly and Flashbots for Ethereum mainnet, which were authenticated by consensus `eth_chainId = 0x1` without a key. 1RPC answered from a developer machine but was rejected by the Studio validators (§6). Infura, Alchemy and Ankr require an API key for mainnet, so they can be listed only if they expose a keyless gateway.
 
 ### The round: representative, corroborated measurement
 
@@ -223,7 +225,7 @@ An LP who redeems shares during a staged claim absorbs the **full** pending rese
 
 ### Stack
 
-Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Underwrite, Marketplace, Sentinel, Incidents, About. **The dashboard targets the v0.3.0 ABI and has not been migrated** (§6).
+Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Underwrite, Marketplace, Sentinel, Incidents, About. The dashboard speaks the v0.4.0 ABI: policies are bought by choosing a registry id (there is no URL or latency input), probes show the corroborated verdict, reference head and outage continuity, and a confirmed claim shows its vesting progress with a *Release payout* action.
 
 ## 6. Verification: what is proven, and what is not
 
@@ -247,9 +249,11 @@ Plus the solvency invariant under simultaneous breach of every policy paid acros
 
 ### Not verified
 
-- **Not deployed.** The v0.4.0 source has not been deployed to Studio Next and `deployments/*` still describe the v0.3.0 contract. No live transaction exercises the registry, corroborated rounds or vesting. `scripts/register_endpoints.py` and the updated `scripts/verify_live.py` have not been run against a network.
-- **Frontend not migrated.** `frontend/` (and its generated ABI) still uses `create_policy(url, latency, …, mode)`, `max_latency_ms` and the pre-vesting claim flow. Its test suite exercises its own in-memory port of v0.3.0 and was not re-run for this change. A migration needs: the registry listing/selection UI, the new `create_policy` arguments, corroboration fields (`verdict`, `refs_ok`, `ref_head`, `outage_blocks`), the `VESTING` status and `release_payout`, and removal of latency.
-- **Live provider behaviour.** The default manifest was checked with plain `eth_chainId` calls only. Real validators' views of those providers, rate limits and height drift have not been observed.
+- **Deployed, but only partly exercised live.** The v0.4.0 contract is on Studio Next and its four-plus-one registry listings were accepted by consensus (`FINISHED_WITH_RETURN`, `MAJORITY_AGREE`). Beyond that, nothing has run on the chain: no policy, probe, claim or release. The listing delay (24 h) has to pass first, and `scripts/verify_live.py` has not been run.
+- **On-chain reads could not be checked.** After deployment, Studio Next's `gen_call` read endpoint failed for every contract, including the previous one (`Can't reconnect until invalid transaction is rolled back`). The registrations were therefore made by sending the transactions directly, and the listings have **not been read back** from the contract. The live dashboard cannot read state until that endpoint recovers; demo mode (`NEXT_PUBLIC_PULSESLA_MODE=demo`) is unaffected.
+- **1RPC was rejected by the validators.** `https://1rpc.io/eth` answered `eth_chainId` from a developer machine, but the Studio validators did not agree on it (`MAJORITY_DISAGREE`), so it is not listed. Tenderly's public gateway and Flashbots replaced it. This is exactly the kind of validator-side behaviour the earlier unit tests cannot show.
+- **Frontend verified against its own port only.** The dashboard's 440 tests run against an in-memory port of the v0.4.0 contract, plus the parity fixtures generated from the real contract (premiums). They have not been run against the deployed contract.
+- **Live provider behaviour.** Of the default manifest, the five listed providers were authenticated by consensus `eth_chainId` only. Real validators' views of `eth_blockNumber` on them, their rate limits and height drift have not been observed.
 - **Latency enforcement** is removed, not verified (§7).
 - `scripts/deploy.py` locates the new contract address in the receipt on a best-effort basis.
 
@@ -325,7 +329,7 @@ npm run dev -- -p 3001                            # http://localhost:3001
 npm run typecheck && npm run lint && npm run test && npm run build
 ```
 
-The dashboard is **live** by default against the address in `frontend/lib/generated/deployment.json`. Set `NEXT_PUBLIC_PULSESLA_MODE=demo` for the in-memory simulation. As noted in §6, it has not been migrated to the v0.4.0 ABI. Do not run `npm run build` while the dev server is running: both use `frontend/.next`.
+The dashboard is **live** by default against the address in `frontend/lib/generated/deployment.json` (the single source for the app's ABI and address; `scripts/deploy.py` writes it). Set `NEXT_PUBLIC_PULSESLA_MODE=demo` for the in-memory simulation, which lists five authenticated providers and replays a corroborated outage, a vesting payout and a staged claim. Do not run `npm run build` while the dev server is running: both use `frontend/.next`.
 
 ### Scripts
 
@@ -343,6 +347,6 @@ The dashboard is **live** by default against the address in `frontend/lib/genera
 contracts/uptime_sla.py   the intelligent contract (registry · corroboration · vesting)
 tests/                    contract tests (conftest.py: simulated multi-provider network)
 scripts/                  deploy · register endpoints · live verification · simulation · parity export
-deployments/              address, ABI, receipts (v0.3.0 records, pending redeploy)
-frontend/                 Next.js dashboard (targets v0.3.0, pending migration)
+deployments/              address, ABI, receipts (studio-next.json = v0.4.0)
+frontend/                 Next.js dashboard (v0.4.0 ABI; in-memory port of the contract for demo mode and tests)
 ```
