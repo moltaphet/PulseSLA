@@ -25,7 +25,7 @@ describe("About page", () => {
     expect(screen.getByText(/economic invariant/)).toBeInTheDocument();
     expect(screen.getByText(/absorbs the full pending reserved liability/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /not continuous pings/ })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /Latency is not an enforced metric/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /What is enforced/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /GenLayer docs/ })).toHaveAttribute("href", "https://docs.genlayer.com");
   });
 

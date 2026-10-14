@@ -60,7 +60,7 @@ export function useProtocol(): ProtocolContextValue {
 
 interface ProviderProps {
   children: ReactNode;
-  /** Test seam: inject a client (e.g. a zero-latency DemoClient). */
+  /** Test seam: inject a client (e.g. a zero-delay DemoClient). */
   client?: ProtocolClient;
   /** Test seam: inject an EIP-1193 provider, or null for "no wallet". */
   walletProvider?: Eip1193Provider | null;

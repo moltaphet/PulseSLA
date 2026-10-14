@@ -9,7 +9,7 @@ import { createDemoWorld, DEMO_ACCOUNT } from "@/lib/sim/seed";
 export const NOW = 1_900_000_000;
 export { DEMO_ACCOUNT };
 
-/** A zero-latency demo client over the deterministic seeded world. */
+/** A zero-delay demo client over the deterministic seeded world. */
 export function makeDemo(): DemoClient {
   return new DemoClient(createDemoWorld(NOW), 0);
 }

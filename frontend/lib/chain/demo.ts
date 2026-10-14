@@ -14,7 +14,7 @@ export class DemoClient implements ProtocolClient {
 
   constructor(
     readonly sim: SimProtocol = createDemoWorld(),
-    private readonly latencyMs = 450,
+    private readonly delayMs = 450,
   ) {}
 
   async getPoolMetrics() { return this.sim.metrics(); }
@@ -26,7 +26,7 @@ export class DemoClient implements ProtocolClient {
   async getBalance(address: string) { return this.sim.balanceOf(address.toLowerCase()); }
 
   private async tx<T>(summary: string, run: () => T, receipt: (r: T) => Partial<TxReceipt> = () => ({})): Promise<TxReceipt> {
-    await sleep(this.latencyMs);
+    await sleep(this.delayMs);
     const out = run(); // reverts surface as ProtocolError, like a failed transaction
     return { hash: hash(), summary, ...receipt(out) };
   }

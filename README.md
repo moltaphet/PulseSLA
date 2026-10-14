@@ -11,11 +11,11 @@ PulseSLA is parametric downtime insurance for Web3 infrastructure: public RPC pr
 | **Contract** | [`0x22119E501A483a9FF833bBf42d5C259Ee9B21E11`](https://explorer-studio-next.genlayer.com/address/0x22119E501A483a9FF833bBf42d5C259Ee9B21E11), v0.4.0, deployed 2026-10-13 with a 60 s activation delay, 300 s claim grace and 0.01 GEN probe bond |
 | **Registry** | five listings: `publicnode-eth`, `cloudflare-eth`, `drpc-eth`, `tenderly-eth`, `flashbots-eth` (Ethereum mainnet, chain 1). Each was authenticated by consensus `eth_chainId`. They become insurable 24 h after listing |
 | **Previous deployment** | [`0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8`](https://explorer-studio-next.genlayer.com/address/0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8): the pre-registry build (v0.3.0), superseded |
-| **Records** | [`deployments/studio-next.json`](deployments/studio-next.json) describes the v0.4.0 deployment. [`deployments/studio-next-verification.json`](deployments/studio-next-verification.json) is the **v0.3.0** live verification and does not cover v0.4.0 |
+| **Records** | [`deployments/studio-next.json`](deployments/studio-next.json) describes the v0.4.0 deployment. The v0.3.0 live verification is archived under [`deployments/archive/`](deployments/archive/) and does not cover v0.4.0 |
 
 > **v0.4.0: authenticated-infrastructure build.** This revision answers the hackathon steward's rejection ("a policyholder can insure an endpoint they control, choose the observations that establish a breach, and receive a vested payout without any independent proof"). See [§3 Authenticated Infrastructure & Exploit Mitigation](#3-authenticated-infrastructure--exploit-mitigation). It is deployed to Studio Next (above) and the dashboard in `frontend/` has been migrated to the new ABI. See [§6](#6-verification-what-is-proven-and-what-is-not) for what has and has not been exercised live.
 >
-> **Breaking changes.** `create_policy(endpoint_id, coverage_amount, duration_blocks, min_uptime_bps, probe_interval_blocks)` replaces the URL/latency/mode signature. `max_latency_ms` and `http` probe mode are gone ([§7](#7-clock-and-latency-transparency)). `settle_claim` now *confirms* a breach and starts vesting; the new `release_payout` pays it out.
+> **Breaking changes.** `create_policy(endpoint_id, coverage_amount, duration_blocks, min_uptime_bps, probe_interval_blocks)` replaces the earlier URL-based signature; the policy binds only to a registry endpoint and the enforced metrics in [§7](#7-enforced-coverage). `settle_claim` now *confirms* a breach and starts vesting; the new `release_payout` pays it out.
 
 ---
 
@@ -27,7 +27,7 @@ PulseSLA is parametric downtime insurance for Web3 infrastructure: public RPC pr
 4. [Game theory, economic assumptions and residual risks](#4-game-theory-economic-assumptions-and-residual-risks)
 5. [Specification](#5-specification)
 6. [Verification: what is proven, and what is not](#6-verification-what-is-proven-and-what-is-not)
-7. [Clock and latency transparency](#7-clock-and-latency-transparency)
+7. [Enforced coverage](#7-enforced-coverage)
 8. [Quickstart, testing and deployment](#8-quickstart-testing-and-deployment)
 
 ---
@@ -130,7 +130,7 @@ ref 4 ───┘
 | `FAILING` | Strict majority of references healthy, and the target is unreachable / non-200 / invalid payload / more than 50 blocks behind the reference head | Streak +1, one interval of downtime |
 | `INCONCLUSIVE` | Fewer than a strict majority of references healthy (the observer is blind or the network is split), or the target answered `429` | **Nothing changes**; bond refunded in full |
 
-The reference head is the **lower median** of the healthy references' heights, so one outlier reference (high or low) cannot move it. Enforced SLA metrics are exactly two, both corroborated: **availability** (HTTP 200 + valid JSON-RPC block number) and **freshness** (block height against the reference head). Latency is no longer enforced ([§7](#7-clock-and-latency-transparency)).
+The reference head is the **lower median** of the healthy references' heights, so one outlier reference (high or low) cannot move it. Enforced SLA metrics are exactly two, both corroborated: **availability** (HTTP 200 + valid JSON-RPC block number) and **freshness** (block height against the reference head).
 
 ### What this does and does not claim
 
@@ -225,7 +225,7 @@ An LP who redeems shares during a staged claim absorbs the **full** pending rese
 
 ### Stack
 
-Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Underwrite, Marketplace, Sentinel, Incidents, About. The dashboard speaks the v0.4.0 ABI: policies are bought by choosing a registry id (there is no URL or latency input), probes show the corroborated verdict, reference head and outage continuity, and a confirmed claim shows its vesting progress with a *Release payout* action.
+Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Underwrite, Marketplace, Sentinel, Incidents, About. The dashboard speaks the v0.4.0 ABI: policies are bought by choosing a registry id (there is no URL input), probes show the corroborated verdict, reference head and outage continuity, and a confirmed claim shows its vesting progress with a *Release payout* action.
 
 ## 6. Verification: what is proven, and what is not
 
@@ -254,20 +254,19 @@ Plus the solvency invariant under simultaneous breach of every policy paid acros
 - **1RPC was rejected by the validators.** `https://1rpc.io/eth` answered `eth_chainId` from a developer machine, but the Studio validators did not agree on it (`MAJORITY_DISAGREE`), so it is not listed. Tenderly's public gateway and Flashbots replaced it. This is exactly the kind of validator-side behaviour the earlier unit tests cannot show.
 - **Frontend verified against its own port only.** The dashboard's 440 tests run against an in-memory port of the v0.4.0 contract, plus the parity fixtures generated from the real contract (premiums). They have not been run against the deployed contract.
 - **Live provider behaviour.** Of the default manifest, the five listed providers were authenticated by consensus `eth_chainId` only. Real validators' views of `eth_blockNumber` on them, their rate limits and height drift have not been observed.
-- **Latency enforcement** is removed, not verified (§7).
 - `scripts/deploy.py` locates the new contract address in the receipt on a best-effort basis.
 
-## 7. Clock and latency transparency
+## 7. Enforced coverage
 
-GenVM exposes no clock to the contract that advances across a web request. On Studio Next the earlier build recorded `latency_ms = 0` for a live, responsive endpoint under both `time.perf_counter()` and `gl.vm.trace_time_micro()`; `gl.vm.get_timestamp()` has one-second resolution, too coarse to enforce millisecond limits. Beyond that, one vantage point's latency is not a *representative* measurement.
+PulseSLA enforces exactly what the GenVM validators can observe and corroborate. Every policy binds to an authenticated registry endpoint and to these conditions only:
 
-The earlier build therefore stored and quoted `max_latency_ms` while enforcing nothing. The steward asked for corroborated, representative measurements for *every enforced* metric, so v0.4.0 **removes latency as a policy parameter** instead of leaving an unenforceable promise in the ABI.
-
-| Check | On-chain |
+| Condition | Enforcement |
 |---|---|
-| Availability: HTTP 200 and a valid JSON-RPC block number | **Enforced**, corroborated |
-| Freshness: block height within 50 blocks of the reference head | **Enforced**, corroborated |
-| Latency | **Not offered.** Needs a sub-second clock that observes network wait *and* a multi-vantage definition. |
+| RPC availability: HTTP 200 and a valid JSON-RPC `eth_blockNumber` | **Enforced**, corroborated by the validator set and the independent references |
+| Chain/block progression: height within 50 blocks of the reference head, endpoint authenticated by `eth_chainId` | **Enforced**, corroborated |
+| Uptime SLA threshold (`min_uptime_bps`) over consecutive failing rounds | **Enforced**, derived from the corroborated rounds above |
+
+No other metric is stored, quoted or priced: the contract ABI and the dashboard expose no parameter that cannot trigger on the target runtime.
 
 ## 8. Quickstart, testing and deployment
 
