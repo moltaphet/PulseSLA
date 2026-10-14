@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import parity from "@/lib/__fixtures__/premium-parity.json";
+import termParity from "@/lib/__fixtures__/min-duration-parity.json";
 import {
-  apexOf, coverageLimits, exposureFor, hostnameOf, PAYOUT_COOLDOWN_SECS, PAYOUT_VEST_SECS, quotePremium, rateBpsFor, referencesFor, releasableBy,
+  apexOf, coverageLimits, exposureFor, hostnameOf, minDurationBlocks, PAYOUT_COOLDOWN_SECS, PAYOUT_VEST_SECS, quotePremium, rateBpsFor, referencesFor, releasableBy,
   validateEndpointUrl, vestedPayout,
 } from "@/lib/pricing";
 import type { Endpoint, Policy } from "@/lib/types";
@@ -90,7 +91,7 @@ describe("exposureFor", () => {
     id: 1, holder: "0xa", endpointId: "h", endpointUrl: "", host: "h.io", apex: "h.io", chainId: 1, minUptimeBps: 9990, probeInterval: 60,
     coverage: ATTO, premium: 0n, createdAt: 0, activeFrom: 0, expiresAt: 0, status: "ACTIVE", samplesTotal: 0, samplesOk: 0,
     uptimeBps: 10000, inconclusiveRounds: 0, downtimeSecs: 0, consecutiveFailures: 0, outageStartedAt: 0, outageBlocks: 0, baselineOk: false,
-    lastProbeAt: 0, lastBlock: 0, lastRefHead: 0, lastReason: "", lastOk: false, settleAt: 0, claimCount: 0, payout: 0n, released: 0n,
+    lastProbeAt: 0, lastBlock: 0, lastRefHead: 0, lastReason: "", lastOk: false, breachAt: 0, settleAt: 0, claimCount: 0, payout: 0n, released: 0n,
     releasable: 0n, vestStart: 0, ...over,
   });
   it("counts only live policies, case-insensitively for holders", () => {
@@ -144,4 +145,14 @@ describe("referencesFor: parity with the contract's reference selection", () => 
     const all = [ep("a"), ep("b", { listedAt: now - 10 }), ep("c")];
     expect(referencesFor(all[0], all, now).map((e) => e.id)).toEqual(["c"]);
   });
+});
+
+describe("minDurationBlocks: parity with the contract's minimum insurable term", () => {
+  it("has fixture rows", () => expect(termParity.length).toBeGreaterThan(100));
+  it.each(termParity.map((r) => [r.claim_grace, r.uptime_bps, r.interval_blocks, r.min_blocks] as const))(
+    "grace %i s, %i bps, every %i blocks -> %i blocks",
+    (grace, uptime, interval, expected) => {
+      expect(minDurationBlocks(uptime, interval, grace)).toBe(expected);
+    },
+  );
 });

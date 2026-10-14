@@ -107,6 +107,7 @@ export function parsePolicy(raw: unknown): Policy {
     lastRefHead: num(r.last_ref_head),
     lastReason: str(r.last_reason) as ProbeReason | "",
     lastOk: r.last_ok === true,
+    breachAt: num(r.breach_at),
     settleAt: num(r.settle_at),
     claimCount: num(r.claim_count),
     payout: big(r.payout),

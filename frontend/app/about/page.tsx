@@ -5,7 +5,7 @@ export const metadata = {
   description: "How PulseSLA turns infrastructure SLAs into autonomous, consensus-settled parametric insurance.",
 };
 
-export const TEST_COUNTS = { contract: 204, frontend: 440 } as const;
+export const TEST_COUNTS = { contract: 224, frontend: 572 } as const;
 const REPO_URL = process.env.NEXT_PUBLIC_REPO_URL;
 const DOCS_URL = "https://docs.genlayer.com";
 
@@ -35,6 +35,8 @@ const LIMITS = [
   { title: "Residual risk 3: conservative early-exit penalty", body: "An LP who redeems during a BREACH_PENDING window absorbs the full pending reserved liability, even if the claim is later dismissed because the endpoint recovered. The difference accrues to the LPs who stayed. This is enforced on purpose: it completely prevents front-running withdrawals, where an LP leaves just before settlement and shifts the loss onto everyone else." },
   { title: "Trust moves to the registry governor", body: "The governor decides which endpoints are listed and therefore which providers can be insured and used as references. A compromised governor could list a hostile reference set, which is why listings age 24 hours before they count and are immutable. Use a multisig governor. Independence of references is only domain-deep: two providers on the same cloud are not detected." },
   { title: "Uptime comes from probe transactions, not continuous pings", body: "There is no centralized heartbeat. A probe runs only when someone submits trigger_probe, at most once per policy interval, and is decided by decentralized validator consensus on-chain. Downtime is the sum of corroborated failing rounds over the elapsed window (at least 24 hours), so unprobed time counts as up and nobody can improve the ratio by choosing when to probe. Outages between probes are invisible, and with no probes nothing is detected." },
+  { title: "A claim must be confirmed inside the term", body: "Probes and settlements are rejected from the policy's expiry. A staged claim that is not confirmed before the term ends lapses and releases its reserve, the payout age-ramp is frozen where the breach was staged, and an outage is one outage only if its failing rounds follow each other within an hour. Under a mass outage the per-epoch payout ceiling can push a claim on a short policy past its expiry; that is deliberate and favours underwriters." },
+  { title: "Terms that cannot pay are refused", body: "A policy needs a healthy baseline, the failing rounds its SLA requires, the claim grace and a little slack, so the form and the contract both reject terms shorter than that, and probe intervals above 30 minutes. While coverage, claims or payouts are outstanding the pool always keeps a real position: the last underwriter cannot exit completely." },
   { title: "What is enforced", body: "The SLA enforces corroborated RPC availability and block progression against the reference head, and nothing else. Correlated outages across most references are inconclusive by design: they are never paid." },
   { title: "Approximations and liveness trade-offs", body: "Domain grouping approximates the Public Suffix List, and strict block-height bounds can cost an occasional probe retry. Validators are assumed to be honest-majority." },
 ] as const;

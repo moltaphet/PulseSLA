@@ -35,11 +35,36 @@ export function parseVotes(tx: Record<string, unknown>): ConsensusVote[] | undef
   }));
 }
 
-/** Best-effort failure text from a decided-but-reverted transaction. */
+const first = (keys: string[], ...sources: Record<string, unknown>[]): string | undefined => {
+  for (const src of sources) {
+    for (const key of keys) {
+      const v = src?.[key];
+      if (typeof v === "string" && v !== "") return v;
+    }
+  }
+  return undefined;
+};
+
+/** Lifecycle statuses that prove the network accepted the transaction's outcome. */
+const OK_STATUSES = new Set(["ACCEPTED", "FINALIZED"]);
+
+/**
+ * Failure text for a decided transaction, or null when it is PROVEN successful. Success is never assumed:
+ *   - the lifecycle status must be ACCEPTED or FINALIZED (UNDETERMINED, PENDING, ... are not outcomes),
+ *   - the execution result must be FINISHED_WITH_RETURN (a missing result is "unknown", not "fine"),
+ *   - a reported consensus result must be MAJORITY_AGREE.
+ * Both naming styles are read (camelCase from the SDK's canonical receipt, snake_case from raw RPC).
+ */
 export function failureReason(receipt: Record<string, unknown>, tx: Record<string, unknown>): string | null {
-  const exec = (receipt.txExecutionResultName ?? receipt.tx_execution_result_name) as string | undefined;
-  const consensusName = receipt.result_name as string | undefined;
-  if (exec && exec !== "FINISHED_WITH_RETURN") {
+  const status = first(["statusName", "status_name", "status"], receipt, tx);
+  const exec = first(["txExecutionResultName", "tx_execution_result_name"], receipt, tx);
+  const consensusName = first(["resultName", "result_name"], receipt, tx);
+  if (!status || !OK_STATUSES.has(status)) {
+    const why = consensusName && consensusName !== "MAJORITY_AGREE" ? `; validators did not reach consensus (${consensusName})` : "";
+    return `Transaction was not accepted by the network (status ${status ?? "unknown"}${why}). Nothing was confirmed.`;
+  }
+  if (!exec) return "Transaction outcome could not be verified: the network reported no execution result.";
+  if (exec !== "FINISHED_WITH_RETURN") {
     const leader = ((tx.consensus_data as { leader_receipt?: { genvm_result?: { stderr?: string } }[] } | undefined)?.leader_receipt ?? [])[0];
     const stderr = leader?.genvm_result?.stderr;
     return stderr && /\[[A-Z_]+\]/.test(stderr) ? stderr : `Execution failed (${exec})`;

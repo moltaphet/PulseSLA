@@ -115,6 +115,8 @@ export interface Policy {
   lastRefHead: number;
   lastReason: ProbeReason | "";
   lastOk: boolean;
+  /** When the current/last claim was staged: the payout age-ramp is frozen here, never at settlement. */
+  breachAt: number;
   settleAt: number;
   claimCount: number;
   /** Confirmed payout (fixed at confirmation), the part already released, and the part releasable now. */

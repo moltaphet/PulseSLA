@@ -14,7 +14,7 @@ import { Button, Card, Dot, EmptyState, Pill, Row } from "./ui";
 const PRIORITY: Record<string, number> = { BREACH_PENDING: 0, VESTING: 1, ACTIVE: 2, PAID: 3, LAPSED: 4, EXPIRED: 5 };
 
 export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
-  const { policies, incidents, now, account, metrics, loading, canTransact, tx, triggerProbe, settleClaim, releasePayout, expirePolicy, votesByIncident } = useProtocol();
+  const { policies, incidents, now, account, metrics, loading, canTransact, blockedReason, tx, triggerProbe, settleClaim, releasePayout, expirePolicy, votesByIncident } = useProtocol();
   const [onlyMine, setOnlyMine] = useState(false);
   const [picked, setPicked] = useState<number | null>(initialPolicyId ?? null);
 
@@ -164,7 +164,7 @@ export function Sentinel({ initialPolicyId }: { initialPolicyId?: number }) {
                         {expirable && <Button variant="ghost" loading={busy} disabled={!canTransact} onClick={() => void expirePolicy(selected.id)}>Expire policy</Button>}
                       </div>
                       <p className="text-xs text-muted">
-                        {!canTransact ? "Connect a wallet to transact. "
+                        {!canTransact ? `${blockedReason ?? "Connect a wallet to transact"}. `
                           : selected.status === "BREACH_PENDING" ? (se.reason ?? "Ready: a fresh corroborated round will decide whether the breach is confirmed. ")
                           : selected.status === "VESTING" ? (re.reason ?? `Ready: ${formatGen(selected.releasable)} GEN can be released to the holder now. `)
                           : (pe.reason ?? "Ready. ")}

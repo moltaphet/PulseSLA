@@ -123,7 +123,7 @@ const policy = (over: Partial<Policy> = {}): Policy => ({
   id: 1, holder: "0xa", endpointId: "alpha", endpointUrl: "https://x.io", host: "x.io", apex: "x.io", chainId: 1, minUptimeBps: 9990, probeInterval: 60,
   coverage: ATTO, premium: 1n, createdAt: 0, activeFrom: 100, expiresAt: 1000, status: "ACTIVE", samplesTotal: 0, samplesOk: 0, uptimeBps: 10000,
   inconclusiveRounds: 0, downtimeSecs: 0, consecutiveFailures: 0, outageStartedAt: 0, outageBlocks: 0, baselineOk: false, lastProbeAt: 0, lastBlock: 0,
-  lastRefHead: 0, lastReason: "", lastOk: false, settleAt: 0, claimCount: 0, payout: 0n, released: 0n, releasable: 0n, vestStart: 0, ...over,
+  lastRefHead: 0, lastReason: "", lastOk: false, breachAt: 0, settleAt: 0, claimCount: 0, payout: 0n, released: 0n, releasable: 0n, vestStart: 0, ...over,
 });
 
 describe("policy state", () => {

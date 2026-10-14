@@ -12,16 +12,16 @@ import { formatBps, formatDuration, formatGen } from "@/lib/units";
 import { Button, Card, Field, Pill, Row } from "./ui";
 
 const DURATIONS = [7, 30, 90, 180, 365];
-const INTERVALS = [1, 5, 15, 60, 360];
+const INTERVALS = [1, 5, 15, 30];
 
 export function PolicyMarketplace() {
-  const { metrics, endpoints, policies, account, balance, canTransact, createPolicy, tx, now } = useProtocol();
+  const { metrics, endpoints, policies, account, balance, canTransact, blockedReason, createPolicy, tx, now } = useProtocol();
   const [form, setForm] = useState<PolicyFormState>(DEFAULT_FORM);
   const [minted, setMinted] = useState<number | null>(null);
   const set = <K extends keyof PolicyFormState>(k: K, v: PolicyFormState[K]) => { setForm((f) => ({ ...f, [k]: v })); setMinted(null); };
 
   const draft = useMemo(
-    () => draftPolicy(form, { tvl: metrics?.tvl ?? 0n, lockedCoverage: metrics?.lockedCoverage ?? 0n, policies, holder: account, balance, endpoints, now }),
+    () => draftPolicy(form, { tvl: metrics?.tvl ?? 0n, lockedCoverage: metrics?.lockedCoverage ?? 0n, policies, holder: account, balance, endpoints, now, claimGrace: metrics?.claimGrace }),
     [form, metrics, policies, account, balance, endpoints, now],
   );
   const tier = SLA_TIERS.find((t) => t.id === form.tier) ?? SLA_TIERS[0];
@@ -153,7 +153,7 @@ export function PolicyMarketplace() {
               <li><span className="font-semibold text-ink">Baseline · </span>cover applies once the endpoint has been observed healthy.</li>
             </ul>
             <Button type="submit" className="mt-5 w-full" loading={busy} disabled={!draft.valid || !canTransact}>
-              {!canTransact ? "Connect a wallet to mint" : draft.premium !== null ? `Mint policy · pay ${formatGen(draft.premium, 6)} GEN` : "Mint policy"}
+              {!canTransact ? (blockedReason ?? "Connect a wallet to mint") : draft.premium !== null ? `Mint policy · pay ${formatGen(draft.premium, 6)} GEN` : "Mint policy"}
             </Button>
           </Card>
         </div>

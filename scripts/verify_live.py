@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.common import DEPLOYMENTS, KEY_DIR, load_account, make_client, policy_fees  # noqa: E402
+from scripts.common import DEPLOYMENTS, KEY_DIR, TxNotSuccessful, assess_receipt, load_account, make_client, policy_fees  # noqa: E402
 
 GEN = 10**18
 OK_EXEC = "FINISHED_WITH_RETURN"
@@ -54,8 +54,13 @@ class Live:
         h = self.client.write_contract(self.address, fn, args=list(args), value=value, fees=policy_fees(self.client))
         r = self.client.wait_for_transaction_receipt(h, wait_until="decided", interval=4, retries=150)
         tx = self.client.get_transaction(h)
-        ex = r.get("txExecutionResultName") or r.get("tx_execution_result_name")
-        entry = {"fn": fn, "tx": str(h), "execution": ex, "consensus": r.get("result_name"),
+        try:
+            ok = assess_receipt(r, tx)
+            ex, error = ok["execution"], None
+        except TxNotSuccessful as exc:
+            ex, error = None, str(exc)
+        entry = {"fn": fn, "tx": str(h), "execution": ex, "consensus": r.get("result_name") or r.get("resultName"),
+                 "accepted": error is None, "error": error,
                  "votes": (tx.get("consensus_data") or {}).get("votes"), "seconds": round(time.time() - t0, 1)}
         self.log.append(entry)
         print(f"    {fn}: tx {str(h)[:18]}… execution={ex} consensus={entry['consensus']} ({entry['seconds']}s)")
@@ -111,9 +116,11 @@ def main() -> None:
 
     step("b. Buy a live policy on a registered endpoint")
     cov = int(a.coverage_gen * GEN)
-    blocks, uptime = 300, 9900
+    uptime, interval = 9900, 5
+    # the shortest term the contract accepts for this SLA and cadence (never below one hour)
+    blocks = max(300, int(L.read("min_insurable_duration", uptime, interval)))
     premium = int(L.read("quote_premium", cov, blocks, uptime))
-    e, r, _ = L.write("create_policy", a.endpoint_id, cov, blocks, uptime, 5, value=premium)
+    e, r, _ = L.write("create_policy", a.endpoint_id, cov, blocks, uptime, interval, value=premium)
     check("policy created", e["execution"] == OK_EXEC and e["consensus"] == "MAJORITY_AGREE")
     pid = int(L.read("get_policy_count"))
     p = L.read("get_policy_status", pid)

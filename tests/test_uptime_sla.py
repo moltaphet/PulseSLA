@@ -894,7 +894,7 @@ class TestClaims:
         env.transfers.clear()
         r = env.settle(pid)
         p = env.policy(pid)
-        expected = vested(cov, env.now - p["active_from"])
+        expected = vested(cov, p["breach_at"] - p["active_from"])  # frozen at staging, not at settlement
         assert r["confirmed"] and r["payout"] == str(expected)
         assert r["releasable_from"] == env.now + COOLDOWN and r["fully_vested_at"] == env.now + COOLDOWN + VEST
         assert cov * 25 // 100 <= expected < cov * 30 // 100  # young policy: ~25% vested
@@ -1048,7 +1048,11 @@ class TestClaims:
         tvl = int(env.metrics()["tvl"])
         with env.vm.expect_revert("[INSUFFICIENT_LIQUIDITY]"):
             env.withdraw(env.owner, tvl)
-        env.withdraw(env.owner, tvl - 10 * ATTO)  # the reserved 10 stays
+        # the sole underwriter may not burn every share behind outstanding cover
+        # (see TestAuditRegressions); a sliver of the position must remain
+        with env.vm.expect_revert("[INSUFFICIENT_LIQUIDITY]"):
+            env.withdraw(env.owner, tvl - 10 * ATTO)
+        env.withdraw(env.owner, tvl - 10 * ATTO - 2 * 10**12)  # the reserved 10 stays
 
     def test_vesting_payout_capital_cannot_be_withdrawn(self, funded):
         env = funded
@@ -1763,3 +1767,224 @@ class TestClaimVelocity:
         assert all(env.policy(pid)["status"] == "VESTING" for pid in pids)
         assert days <= 7  # well inside the 14-day settlement window
         env.assert_solvent()
+
+
+# ============================================================================
+# Audit regressions (PulseSLA-review, findings 1-4): each test is the audit's
+# proof of concept, now required to FAIL to reproduce the exploit.
+# ============================================================================
+SHORT_BLOCKS = 300  # the one-hour minimum term
+
+
+class TestAuditRegressions:
+    # --- P1-1: orphaned capital ------------------------------------------------
+    def test_last_lp_cannot_burn_every_share_behind_a_staged_claim(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=10 * ATTO)
+        env.stage_breach(pid)
+        assert env.policy(pid)["status"] == "BREACH_PENDING"
+        net_value = int(env.contract.get_underwriter(env.hex(env.owner))["value"])
+        with env.vm.expect_revert("[INSUFFICIENT_LIQUIDITY]"):
+            env.withdraw(env.owner, net_value)  # the audit's step 2
+        assert int(env.metrics()["total_shares"]) > 0
+
+    def test_new_depositor_cannot_capture_released_reserve(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=10 * ATTO)
+        env.stage_breach(pid)
+        value = int(env.contract.get_underwriter(env.hex(env.owner))["value"])
+        env.withdraw(env.owner, value - 2 * 10**12)  # as close to a full exit as the guards allow
+        owner_shares = int(env.contract.get_underwriter(env.hex(env.owner))["shares"])
+        assert owner_shares > 0
+        # the endpoint recovers and the claim is dismissed: the reserve is released
+        env.advance(GRACE + 1)
+        env.healthy()
+        assert env.settle(pid)["confirmed"] is False
+        assert env.policy(pid)["status"] == "ACTIVE"
+        freed = int(env.metrics()["tvl"])
+        assert freed >= 10 * ATTO
+        # a 0.001 GEN depositor buys in at the real price and owns almost none of it
+        env.deposit(env.alice, 10**15)
+        alice_value = int(env.contract.get_underwriter(env.hex(env.alice))["value"])
+        assert alice_value <= 10**15 + 1
+        owner_value = int(env.contract.get_underwriter(env.hex(env.owner))["value"])
+        assert owner_value >= freed - 10**15 - 1  # the capital stayed with the LP who stayed
+        env.assert_solvent()
+
+    def test_partial_payout_surplus_stays_with_the_remaining_lp(self, funded):
+        env = funded
+        cov = 10 * ATTO
+        pid = env.create(env.bob, coverage=cov)
+        env.stage_breach(pid)
+        value = int(env.contract.get_underwriter(env.hex(env.owner))["value"])
+        env.withdraw(env.owner, value - 2 * 10**12)
+        env.advance(GRACE + 1)
+        payout = int(env.settle(pid)["payout"])
+        assert payout < cov  # partial: the rest of the reserve is freed
+        env.deposit(env.alice, 10**15)
+        assert int(env.contract.get_underwriter(env.hex(env.alice))["value"]) <= 10**15 + 1
+        assert int(env.contract.get_underwriter(env.hex(env.owner))["value"]) > 0
+        env.assert_solvent()
+
+    def test_a_position_cannot_be_shrunk_to_a_dust_sliver_behind_a_reserve(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=10 * ATTO)
+        env.stage_breach(pid)
+        value = int(env.contract.get_underwriter(env.hex(env.owner))["value"])
+        with env.vm.expect_revert("dust-sized"):
+            env.withdraw(env.owner, value - 1000)
+
+    def test_reported_withdrawable_is_exactly_what_the_contract_accepts(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=10 * ATTO)
+        env.stage_breach(pid)
+        w = int(env.contract.get_underwriter(env.hex(env.owner))["withdrawable"])
+        assert w > 0
+        with env.vm.expect_revert("[INSUFFICIENT_LIQUIDITY]"):
+            env.withdraw(env.owner, w + 1)
+        env.withdraw(env.owner, w)
+        assert int(env.contract.get_underwriter(env.hex(env.owner))["shares"]) > 0
+
+    def test_full_exit_is_allowed_once_nothing_is_locked_and_leaves_no_residue(self, funded):
+        env = funded
+        env.withdraw(env.owner, int(env.contract.get_underwriter(env.hex(env.owner))["value"]))
+        m = env.metrics()
+        assert int(m["total_shares"]) == 0 and int(m["tvl"]) == 0
+
+    # --- P1-2: unbounded gap between failing observations ---------------------
+    def test_failures_on_separate_days_do_not_form_one_outage(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=5 * ATTO, blocks=100_000, uptime=9990, interval=150)
+        env.activate()
+        env.healthy()
+        assert env.probe(pid)["ok"]
+        for _ in range(3):
+            env.advance(24 * 3600)  # a whole day passes unobserved
+            env.fail()
+            r = env.probe(pid)  # a one-second blip caught by the sampler
+            assert r["verdict"] == "FAILING" and r["breach_staged"] is False
+            assert r["consecutive_failures"] == 1  # every failure starts a NEW streak
+            env.healthy()  # recovered immediately; nobody recorded it
+        p = env.policy(pid)
+        assert p["status"] == "ACTIVE"
+        assert int(p["downtime_secs"]) == 3 * 1800  # three bounded credits, never 72 h
+
+    def test_a_streak_survives_a_gap_up_to_the_limit_and_breaks_beyond_it(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=5 * ATTO, interval=150)
+        env.activate()
+        env.healthy()
+        env.probe(pid)
+        env.fail()
+        env.advance(1801)
+        assert env.probe(pid)["consecutive_failures"] == 1
+        env.advance(3600)  # exactly MAX_PROBE_GAP_SECS: still the same outage
+        assert env.probe(pid)["consecutive_failures"] == 2
+        env.advance(3601)  # one second too long: a new outage
+        assert env.probe(pid)["consecutive_failures"] == 1
+
+    def test_a_healthy_round_clears_the_streak_clock(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=5 * ATTO, interval=150)
+        env.activate()
+        env.healthy()
+        env.probe(pid)
+        env.fail()
+        env.advance(1801)
+        env.probe(pid)
+        env.healthy()
+        env.advance(1801)
+        assert env.probe(pid)["ok"]
+        env.fail()
+        env.advance(1801)
+        r = env.probe(pid)
+        assert r["consecutive_failures"] == 1 and env.policy(pid)["outage_started_at"] == env.now
+
+    # --- P2-3: settlement delay and post-expiry observation -------------------
+    def test_waiting_after_expiry_cannot_inflate_or_confirm_a_stale_claim(self, funded):
+        env = funded
+        cov = 10 * ATTO
+        pid = env.create(env.bob, coverage=cov, blocks=SHORT_BLOCKS, uptime=9900, interval=25)
+        env.stage_breach(pid)
+        assert env.policy(pid)["status"] == "BREACH_PENDING"
+        first = vested(cov, env.policy(pid)["breach_at"] - env.policy(pid)["active_from"])
+        env.healthy()  # recovered; nobody settled
+        env.advance(7 * 24 * 3600)  # a week later, long after the one-hour term
+        env.fail()  # a fresh, unrelated failure
+        with env.vm.expect_revert("[INVALID_STATE]"):
+            env.settle(pid)
+        with env.vm.expect_revert("[INVALID_STATE]"):
+            env.probe(pid)
+        assert first < cov  # the audit's 10 GEN outcome is unreachable
+        assert env.contract.expire_policy(pid) == "LAPSED"
+        assert env.policy(pid)["status"] == "LAPSED"
+        assert int(env.metrics()["reserved_payouts"]) == 0
+        env.assert_solvent()
+
+    def test_in_term_settlement_delay_does_not_raise_the_payout(self, funded):
+        env = funded
+        cov = 10 * ATTO
+        pid = env.create(env.bob, coverage=cov, blocks=100_000, interval=25)
+        env.stage_breach(pid)
+        p = env.policy(pid)
+        expected = vested(cov, p["breach_at"] - p["active_from"])
+        env.advance(5 * 24 * 3600)  # waits days, still inside the term
+        env.fail()
+        r = env.settle(pid)
+        assert r["confirmed"] and int(r["payout"]) == expected
+        assert expected < vested(cov, env.now - p["active_from"])  # the old, inflated figure
+
+    def test_a_claim_that_cannot_be_reverified_in_term_is_not_staged(self, funded):
+        env = funded
+        pid = env.create(env.bob, coverage=5 * ATTO, blocks=SHORT_BLOCKS, uptime=9900, interval=25)
+        env.activate()
+        env.healthy()
+        assert env.probe(pid)["ok"]
+        expires = int(env.policy(pid)["expires_at"])
+        env.fail()
+        env.advance(expires - env.now - 4 * 301 - 100)  # the outage completes with < GRACE left
+        last = None
+        for _ in range(4):
+            last = env.next_probe(pid)
+        assert last["consecutive_failures"] == 4 and last["breach_staged"] is False
+        assert env.policy(pid)["status"] == "ACTIVE"
+
+    # --- P2-4: unpayable terms ---------------------------------------------
+    def test_one_hour_policy_with_a_day_long_interval_is_rejected(self, funded):
+        env = funded
+        env.fund(env.bob)
+        env.vm.sender, env.vm.value = env.bob, 10**18
+        with env.vm.expect_revert("[INVALID_PARAMS]"):
+            env.contract.create_policy(ALPHA, 5 * ATTO, SHORT_BLOCKS, 9990, 7200)
+
+    def test_term_too_short_for_the_chosen_sla_is_rejected_before_premium(self, funded):
+        env = funded
+        need = int(env.contract.min_insurable_duration(9000, 150))
+        assert need > SHORT_BLOCKS
+        env.fund(env.bob)
+        env.vm.sender, env.vm.value = env.bob, 10**19
+        with env.vm.expect_revert("term too short"):
+            env.contract.create_policy(ALPHA, 5 * ATTO, need - 1, 9000, 150)
+        assert env.paid_to(env.bob) == 0 and int(env.metrics()["tvl"]) == 100 * ATTO
+        env.vm.value = 10**19
+        env.contract.create_policy(ALPHA, 5 * ATTO, need, 9000, 150)
+
+    @pytest.mark.parametrize("uptime,interval", [(9000, 150), (9500, 150), (9900, 25), (9990, 5), (9999, 60), (9900, 150)])
+    def test_every_accepted_minimum_term_is_actually_payable(self, funded, uptime, interval):
+        env = funded
+        blocks = int(env.contract.min_insurable_duration(uptime, interval))
+        pid = env.create(env.bob, coverage=5 * ATTO, blocks=blocks, uptime=uptime, interval=interval)
+        env.activate()
+        env.healthy()
+        assert env.probe(pid)["ok"]
+        env.fail()
+        staged = False
+        for _ in range(200):
+            env.advance(interval * 12)  # best-case keeper: exactly one round per interval
+            r = env.probe(pid)
+            if r["breach_staged"]:
+                staged = True
+                break
+        assert staged, "an accepted term must be able to stage a claim"
+        env.advance(GRACE)
+        assert env.settle(pid)["confirmed"]

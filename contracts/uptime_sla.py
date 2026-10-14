@@ -34,6 +34,19 @@
 # request, and a single vantage point's latency is not a representative
 # measurement. It was removed rather than left as an unenforceable promise.
 #
+# Measurement model (what a failing round does and does not prove):
+#   * A round is a point observation. A streak of failing rounds is continuous
+#     only if each round follows the previous failing round within
+#     MAX_PROBE_GAP_SECS; a longer silence breaks the streak (unobserved time
+#     is never turned into downtime), and each failing round credits at most
+#     one probe interval, which create_policy caps at MAX_INTERVAL_BLOCKS.
+#   * Nothing is observed after a policy's term: probes and settlements are
+#     rejected from `expires_at`, a staged claim must be confirmed inside the
+#     term, and the payout age-ramp is frozen at the moment the breach was
+#     staged, so waiting cannot inflate a claim.
+#   * create_policy rejects parameter sets from which a claim could not be
+#     staged and confirmed inside the term (see _min_duration_blocks).
+#
 # Solvency invariant (checked by every test):
 #     reserved_payouts <= locked_coverage <= pool_assets.
 # Coverage is locked at policy creation, so a payout (always <= coverage) lowers
@@ -98,6 +111,11 @@ TARGET_FAIL_REASONS = (R_HTTP_ERROR, R_UNREACHABLE, R_BAD_PAYLOAD, R_RATE_LIMITE
 # --- Economics (atto-scale: value * 10 ** 18) -------------------------------
 ATTO = 10**18
 MIN_DEPOSIT = 10**15
+# While any coverage, claim or payout is outstanding the pool may never be left
+# with fewer shares than this. It keeps the last underwriter's position real
+# (never zero) and bounds the price per share when a reserve later frees up, so
+# a dust-sized position cannot round new depositors down to nothing.
+MIN_TOTAL_SHARES = 10**12
 MIN_COVERAGE = 10**15
 BPS = 10000
 YEAR_SECS = 365 * 24 * 3600
@@ -123,7 +141,7 @@ MAX_UPTIME_BPS = 9999
 MIN_DURATION_BLOCKS = 300  # ~1 hour
 MAX_DURATION_BLOCKS = 2_628_000  # ~1 year
 MIN_INTERVAL_BLOCKS = 5  # ~1 minute
-MAX_INTERVAL_BLOCKS = 7200  # ~1 day
+MAX_INTERVAL_BLOCKS = 150  # ~30 minutes: one failing round may credit at most this much downtime
 
 # --- Authenticated registry --------------------------------------------------
 MAX_ENDPOINTS = 32
@@ -142,6 +160,8 @@ MAX_LAG_BLOCKS = 50  # target this far behind the reference head is stale (~10 m
 BREACH_CONSECUTIVE = 3  # consecutive FAILING rounds needed to stage a claim
 MIN_OUTAGE_SECS = 15 * 60  # ...spanning at least this much block-clock time
 MIN_OUTAGE_BLOCKS = 25  # ...and at least this many reference-chain blocks
+MAX_PROBE_GAP_SECS = 3600  # a failing streak survives at most this long between failing rounds
+MIN_SLACK_ROUNDS = 2  # extra probe intervals a policy term must leave for keeper timing
 MEASUREMENT_WINDOW = 30 * 24 * 3600  # uptime window (30 days)
 MIN_UPTIME_WINDOW = 24 * 3600  # uptime is never judged on a window shorter than this
 SETTLE_WINDOW = 14 * 24 * 3600  # after settle_at, a claim lapses (outlasts the velocity queue)
@@ -281,9 +301,39 @@ def _premium_for(coverage: int, duration_blocks: int, min_uptime_bps: int) -> in
     return premium if premium > floor else floor
 
 
+def _ceil_div(a: int, b: int) -> int:
+    return -(-a // b)
+
+
+def _rounds_needed(min_uptime_bps: int, interval_secs: int) -> int:
+    """Failing rounds after the healthy baseline that are needed to stage a
+    claim at the best case (breach early in the window, so the uptime
+    denominator is the MIN_UPTIME_WINDOW floor): the consecutive-round count,
+    the minimum outage span, and enough credited downtime to fall below the
+    chosen SLA."""
+    need_down = _ceil_div((BPS - min_uptime_bps + 1) * MIN_UPTIME_WINDOW, BPS)
+    by_span = _ceil_div(MIN_OUTAGE_SECS, interval_secs) + 1
+    by_down = _ceil_div(need_down, interval_secs)
+    return max(BREACH_CONSECUTIVE, by_span, by_down)
+
+
+def _min_duration_blocks(min_uptime_bps: int, interval_blocks: int, claim_grace_secs: int) -> int:
+    """Shortest term (in blocks) in which a claim can be established at all:
+    one healthy baseline round, the failing rounds, the claim grace period and
+    a little slack for keeper timing -- and the confirming round must still
+    fall strictly inside the term."""
+    interval = interval_blocks * BLOCK_SECONDS
+    rounds = _rounds_needed(min_uptime_bps, interval)
+    secs = (rounds + MIN_SLACK_ROUNDS) * interval + claim_grace_secs
+    need = secs // BLOCK_SECONDS + 1
+    return need if need > MIN_DURATION_BLOCKS else MIN_DURATION_BLOCKS
+
+
 def _vested_payout(coverage: int, age_secs: int) -> int:
     """Payout vests linearly from PAYOUT_FLOOR_BPS to 100% of coverage over
-    PAYOUT_RAMP_SECS of policy age -- the anti-collusion staging curve."""
+    PAYOUT_RAMP_SECS of policy age -- the anti-collusion staging curve. The
+    age is always the age at which the breach was STAGED, never the age at
+    settlement."""
     age = age_secs if age_secs > 0 else 0
     if age >= PAYOUT_RAMP_SECS:
         return coverage
@@ -532,11 +582,12 @@ class Policy:
     status: str
     # --- corroborated telemetry (current measurement window) ---
     window_started: u256
-    downtime_secs: u256  # sum of probe_interval over corroborated FAILING rounds
+    downtime_secs: u256  # sum of probe_interval over corroborated FAILING rounds (each capped at one interval)
     samples_total: u256  # corroborated rounds (HEALTHY + FAILING)
     samples_ok: u256
     inconclusive_rounds: u256
     consecutive_failures: u256
+    last_fail_at: u256  # block-clock time of the latest failing round of the current streak
     outage_started_at: u256  # block-clock time of the first round of the current failing streak
     outage_start_head: u256  # reference head at that round
     last_ref_head: u256
@@ -546,6 +597,7 @@ class Policy:
     last_reason: str
     last_ok: bool
     # --- staged claim and vesting ---
+    breach_at: u256  # time the current/last claim was staged: fixes the payout age-ramp
     settle_at: u256
     claim_count: u256
     payout: u256  # confirmed payout (fixed at confirmation)
@@ -664,7 +716,7 @@ class PulseSLA(gl.contract.Contract):
         return {
             "shares": str(s),
             "value": str(value),
-            "withdrawable": str(value if value < free else free),
+            "withdrawable": str(self._withdrawable(value, free, shares, locked)),
         }
 
     @gl.public.view
@@ -719,6 +771,18 @@ class PulseSLA(gl.contract.Contract):
             out.append(self._policy_dict(i))
             i += 1
         return out
+
+    @gl.public.view
+    def min_insurable_duration(self, min_uptime_bps: u256, probe_interval_blocks: u256) -> int:
+        """Shortest policy term (blocks) create_policy accepts for this uptime
+        target and probe interval: below it no claim could be established."""
+        up = int(min_uptime_bps)
+        interval = int(probe_interval_blocks)
+        if not (MIN_UPTIME_BPS <= up <= MAX_UPTIME_BPS):
+            raise gl.vm.UserError(f"{ERR_PARAMS} min_uptime_bps out of range")
+        if not (MIN_INTERVAL_BLOCKS <= interval <= MAX_INTERVAL_BLOCKS):
+            raise gl.vm.UserError(f"{ERR_PARAMS} probe interval out of range")
+        return _min_duration_blocks(up, interval, int(self.claim_grace))
 
     @gl.public.view
     def quote_premium(self, coverage_amount: u256, duration_blocks: u256, min_uptime_bps: u256) -> str:
@@ -848,6 +912,11 @@ class PulseSLA(gl.contract.Contract):
         net = self._net_assets()
         total = int(self.total_shares)
         if total == 0:
+            # Unreachable by construction (the last holder cannot exit while any
+            # capital is committed), but if it ever happened a depositor must
+            # never be handed capital that nobody owns.
+            if assets != 0 or int(self.locked_coverage) != 0:
+                raise gl.vm.UserError(f"{ERR_STATE} pool holds capital with no shareholders; deposits closed")
             minted = amount
         else:
             if net == 0:
@@ -887,6 +956,16 @@ class PulseSLA(gl.contract.Contract):
         burn = (want * total + net - 1) // net  # ceil: never under-burn
         if burn > held:
             burn = held
+        # The last shareholder may not walk away from capital that is still
+        # committed (live cover, staged claims, unreleased payouts): whatever
+        # that capital frees later (a dismissed claim, a partial payout,
+        # expiry) must stay owned by someone, not be captured by the next
+        # depositor, and a dust-sized remainder must not distort the price.
+        # Everyone can exit fully once nothing is locked.
+        if locked > 0 and total - burn < MIN_TOTAL_SHARES:
+            raise gl.vm.UserError(
+                f"{ERR_LIQUIDITY} withdrawal would leave a dust-sized (or empty) pool while coverage, claims or payouts are outstanding"
+            )
         # effects before interaction
         self.shares[who] = held - burn
         self.total_shares = total - burn
@@ -932,6 +1011,12 @@ class PulseSLA(gl.contract.Contract):
             raise gl.vm.UserError(f"{ERR_PARAMS} min_uptime_bps out of range")
         if not (MIN_INTERVAL_BLOCKS <= interval <= MAX_INTERVAL_BLOCKS):
             raise gl.vm.UserError(f"{ERR_PARAMS} probe interval out of range")
+        min_blocks = _min_duration_blocks(up, interval, int(self.claim_grace))
+        if dur < min_blocks:
+            raise gl.vm.UserError(
+                f"{ERR_PARAMS} term too short: this uptime target and probe interval need at least "
+                f"{min_blocks} blocks for a claim to be establishable inside the term"
+            )
 
         premium = _premium_for(cov, dur, up)
         paid = int(gl.message.value)
@@ -979,6 +1064,7 @@ class PulseSLA(gl.contract.Contract):
             samples_ok=0,
             inconclusive_rounds=0,
             consecutive_failures=0,
+            last_fail_at=0,
             outage_started_at=0,
             outage_start_head=0,
             last_ref_head=0,
@@ -987,6 +1073,7 @@ class PulseSLA(gl.contract.Contract):
             last_block=0,
             last_reason="",
             last_ok=False,
+            breach_at=0,
             settle_at=0,
             claim_count=0,
             payout=0,
@@ -1016,9 +1103,9 @@ class PulseSLA(gl.contract.Contract):
             self._close(policy_id, ST_EXPIRED)
             self._log(policy_id, "POLICY_EXPIRED", "term ended with no confirmed breach")
             return ST_EXPIRED
-        if p.status == ST_BREACH_PENDING and now > int(p.settle_at) + SETTLE_WINDOW:
+        if p.status == ST_BREACH_PENDING and (now >= int(p.expires_at) or now > int(p.settle_at) + SETTLE_WINDOW):
             self._close(policy_id, ST_LAPSED)
-            self._log(policy_id, "CLAIM_LAPSED", "staged claim not settled within the settlement window")
+            self._log(policy_id, "CLAIM_LAPSED", "staged claim not confirmed inside the policy term or settlement window")
             return ST_LAPSED
         raise gl.vm.UserError(f"{ERR_STATE} policy cannot be expired yet")
 
@@ -1072,6 +1159,7 @@ class PulseSLA(gl.contract.Contract):
             if verdict == V_HEALTHY:
                 p.samples_ok = int(p.samples_ok) + 1
                 p.consecutive_failures = 0
+                p.last_fail_at = 0
                 p.outage_started_at = 0
                 p.outage_start_head = 0
                 p.baseline_ok = True
@@ -1079,10 +1167,14 @@ class PulseSLA(gl.contract.Contract):
                 self.pool_assets = int(self.pool_assets) + forfeit
                 self.total_bond_forfeits = int(self.total_bond_forfeits) + forfeit
             else:
-                if int(p.consecutive_failures) == 0:
+                streak = int(p.consecutive_failures)
+                if streak > 0 and now - int(p.last_fail_at) > MAX_PROBE_GAP_SECS:
+                    streak = 0  # unobserved time: the earlier failures are not part of this outage
+                if streak == 0:
                     p.outage_started_at = now
                     p.outage_start_head = int(obs["ref_head"])
-                p.consecutive_failures = int(p.consecutive_failures) + 1
+                p.consecutive_failures = streak + 1
+                p.last_fail_at = now
                 p.downtime_secs = int(p.downtime_secs) + int(p.probe_interval)
             staged = self._maybe_stage_breach(policy_id, p, now, int(obs["ref_head"]))
         self._log(policy_id, "PROBE", _describe(obs), obs)
@@ -1117,6 +1209,10 @@ class PulseSLA(gl.contract.Contract):
             raise gl.vm.UserError(f"{ERR_TOO_SOON} claim grace period has not elapsed")
         if now > int(p.settle_at) + SETTLE_WINDOW:
             raise gl.vm.UserError(f"{ERR_STATE} claim lapsed; call expire_policy")
+        if now >= int(p.expires_at):
+            # No observation is accepted after the term: a claim must be confirmed
+            # inside it, so a failure recorded later cannot revive a stale claim.
+            raise gl.vm.UserError(f"{ERR_STATE} policy term has ended; the claim lapsed, call expire_policy")
         bond = int(gl.message.value)
         if bond < int(self.probe_bond):
             raise gl.vm.UserError(f"{ERR_EXPECTED} probe bond {int(self.probe_bond)} required")
@@ -1129,7 +1225,9 @@ class PulseSLA(gl.contract.Contract):
         coverage = int(p.coverage)
 
         if verdict == V_FAILING:
-            payout = _vested_payout(coverage, now - int(p.active_from))
+            # The age-ramp is frozen at the moment the breach was staged: waiting
+            # to settle must not raise the payout.
+            payout = _vested_payout(coverage, int(p.breach_at) - int(p.active_from))
             assets = int(self.pool_assets)
             if payout > assets:
                 payout = assets  # bounded: can never exceed pool depth
@@ -1175,6 +1273,7 @@ class PulseSLA(gl.contract.Contract):
         self.reserved_payouts = int(self.reserved_payouts) - coverage
         p.status = ST_ACTIVE
         p.consecutive_failures = 0
+        p.last_fail_at = 0
         p.outage_started_at = 0
         p.outage_start_head = 0
         p.last_ok = True
@@ -1274,6 +1373,18 @@ class PulseSLA(gl.contract.Contract):
 
         return gl.vm.run_nondet(leader, validator)
 
+    def _withdrawable(self, value: int, free: int, total: int, locked: int) -> int:
+        """Largest amount `withdraw_underwriting` will accept for a position:
+        its value, the unlocked liquidity, and (while capital is locked) the
+        MIN_TOTAL_SHARES floor on what remains."""
+        cap = value if value < free else free
+        if locked > 0 and total > 0:
+            net = self._net_assets()
+            room = (total - MIN_TOTAL_SHARES) * net // total if total > MIN_TOTAL_SHARES else 0
+            if room < cap:
+                cap = room
+        return cap
+
     def _staged_reserved(self) -> int:
         reserved = int(self.reserved_payouts)
         owed = int(self.owed_payouts)
@@ -1318,7 +1429,10 @@ class PulseSLA(gl.contract.Contract):
             return False  # ...and across real chain progress observed by the references
         if self._uptime_bps(p, now) >= int(p.min_uptime_bps):
             return False
+        if now + int(self.claim_grace) >= int(p.expires_at):
+            return False  # its re-verification could not fall inside the term
         p.status = ST_BREACH_PENDING
+        p.breach_at = now
         p.settle_at = now + int(self.claim_grace)
         p.claim_count = int(p.claim_count) + 1
         self.reserved_payouts = int(self.reserved_payouts) + int(p.coverage)
@@ -1447,6 +1561,7 @@ class PulseSLA(gl.contract.Contract):
             "last_ref_head": int(p.last_ref_head),
             "last_reason": str(p.last_reason),
             "last_ok": bool(p.last_ok),
+            "breach_at": int(p.breach_at),
             "settle_at": int(p.settle_at),
             "claim_count": int(p.claim_count),
             "payout": str(payout),

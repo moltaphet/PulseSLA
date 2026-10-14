@@ -3,9 +3,10 @@
 
     .venv/bin/python scripts/export_parity.py
 
-Writes frontend/lib/__fixtures__/premium-parity.json. The TypeScript `quotePremium`
-must reproduce every row exactly; the vitest suite asserts it, so a pricing change
-in the contract that is not mirrored in the UI fails the build.
+Writes frontend/lib/__fixtures__/premium-parity.json and min-duration-parity.json.
+The TypeScript `quotePremium` and `minDurationBlocks` must reproduce every row
+exactly; the vitest suite asserts it, so a pricing or term-rule change in the
+contract that is not mirrored in the UI fails the build.
 """
 
 import itertools
@@ -37,6 +38,22 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(rows, indent=1) + "\n")
     print(f"wrote {len(rows)} rows -> {out.relative_to(ROOT)}")
+
+    # Shortest insurable term per (claim grace, uptime target, probe interval).
+    term_rows = []
+    for grace in (300, 600, 3600):
+        vm = VMContext()
+        vm.sender = create_address("deployer")
+        with vm.activate():
+            c = deploy_contract(ROOT / "contracts" / "uptime_sla.py", vm, 3600, grace, 10**16)
+            for up, interval in itertools.product((9000, 9500, 9900, 9950, 9990, 9999), (5, 15, 25, 60, 100, 150)):
+                term_rows.append({
+                    "claim_grace": grace, "uptime_bps": up, "interval_blocks": interval,
+                    "min_blocks": int(c.min_insurable_duration(up, interval)),
+                })
+    out = ROOT / "frontend" / "lib" / "__fixtures__" / "min-duration-parity.json"
+    out.write_text(json.dumps(term_rows, indent=1) + "\n")
+    print(f"wrote {len(term_rows)} rows -> {out.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.common import DEPLOYMENTS, load_account, make_client, policy_fees  # noqa: E402
+from scripts.common import DEPLOYMENTS, TxNotSuccessful, assess_receipt, load_account, make_client, policy_fees  # noqa: E402
 
 CHAIN_ID = 1
 # (endpoint_id, provider, registrable domain, keyless url)
@@ -53,22 +53,26 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--network", default="studio-next")
     ap.add_argument("--dry-run", action="store_true", help="print the manifest and commitments; send nothing")
+    ap.add_argument("--skip-reads", action="store_true",
+                    help="do not read the contract (Studio Next's gen_call can fail for every contract): the governor "
+                         "is the deployer recorded in the deployment file, and commitments are computed locally")
     a = ap.parse_args()
 
     record = json.loads((DEPLOYMENTS / f"{a.network}.json").read_text())
     address = record["contract_address"]
     account = load_account(create=False)
     client = make_client(a.network, account, record.get("rpc_url"))
-    gov = client.read_contract(address, "get_governor", args=[])
+    gov = record["deployer"] if a.skip_reads else client.read_contract(address, "get_governor", args=[])
     print(f"contract {address}\ngovernor {gov}\nsender   {account.address.lower()}")
     if not a.dry_run and gov.lower() != account.address.lower():
         raise SystemExit("this key is not the registry governor")
 
-    listed = {e["endpoint_id"] for e in client.read_contract(address, "list_endpoints", args=[0, 50])}
+    listed = set() if a.skip_reads else {e["endpoint_id"] for e in client.read_contract(address, "list_endpoints", args=[0, 50])}
     for endpoint_id, provider, domain, url in PROVIDERS:
         att = attestation(endpoint_id, provider, domain, CHAIN_ID, url)
-        on_chain = client.read_contract(address, "compute_attestation", args=[endpoint_id, provider, domain, CHAIN_ID, url])
-        assert on_chain == att, f"commitment mismatch for {endpoint_id}: {on_chain} != {att}"
+        if not a.skip_reads:
+            on_chain = client.read_contract(address, "compute_attestation", args=[endpoint_id, provider, domain, CHAIN_ID, url])
+            assert on_chain == att, f"commitment mismatch for {endpoint_id}: {on_chain} != {att}"
         print(f"  {endpoint_id:<16} {provider:<12} {url:<42} sha256 {att[:16]}…")
         if endpoint_id in listed:
             print("    already listed")
@@ -78,10 +82,11 @@ def main() -> None:
         h = client.write_contract(address, "register_endpoint", args=[endpoint_id, provider, domain, CHAIN_ID, url, att],
                                   value=0, fees=policy_fees(client))
         r = client.wait_for_transaction_receipt(h, wait_until="decided", interval=4, retries=150)
-        ex = r.get("txExecutionResultName") or r.get("tx_execution_result_name")
-        print(f"    registered: tx {str(h)[:18]}… execution={ex} consensus={r.get('result_name')}")
-        if ex != "FINISHED_WITH_RETURN":
-            raise SystemExit(f"registration of {endpoint_id} failed ({ex})")
+        try:
+            ok = assess_receipt(r, client.get_transaction(h))
+        except TxNotSuccessful as exc:
+            raise SystemExit(f"registration of {endpoint_id} failed: {exc}")
+        print(f"    registered: tx {str(h)[:18]}… status={ok['status']} execution={ok['execution']} consensus={ok['consensus']}")
     if not a.dry_run:
         print("\nlistings become insurable (and become references) after the 24 h listing delay")
 

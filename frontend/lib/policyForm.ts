@@ -1,9 +1,9 @@
 import {
-  coverageLimits, exposureFor, LIMITS, MIN_REFERENCES, quotePremium, rateBpsFor, SLA_TIERS, referencesFor,
+  coverageLimits, exposureFor, LIMITS, MIN_REFERENCES, minDurationBlocks, quotePremium, rateBpsFor, SLA_TIERS, referencesFor,
   type CapName, type CoverageLimits,
 } from "./pricing";
 import type { CreatePolicyArgs, Endpoint, Policy } from "./types";
-import { daysToBlocks, formatGen, parseGen, formatDuration } from "./units";
+import { BLOCK_SECONDS, daysToBlocks, formatGen, parseGen, formatDuration } from "./units";
 
 export interface PolicyFormState {
   /** Registry id of the endpoint to insure. There is deliberately no URL field. */
@@ -27,6 +27,8 @@ export interface FormContext {
   /** The authenticated registry, and the current time (unix seconds) for its listing delay. */
   endpoints: readonly Endpoint[];
   now: number;
+  /** Claim grace period in seconds (a deployment parameter); needed for the minimum insurable term. */
+  claimGrace?: number;
 }
 
 export type FormErrors = Partial<Record<keyof PolicyFormState, string>>;
@@ -96,7 +98,15 @@ export function draftPolicy(form: PolicyFormState, ctx: FormContext): PolicyDraf
 
   const minutes = int(form.intervalMinutes);
   const intervalBlocks = minutes === null ? NaN : minutes * 5;
-  if (!(intervalBlocks >= LIMITS.minIntervalBlocks && intervalBlocks <= LIMITS.maxIntervalBlocks)) errors.intervalMinutes = "Probe interval must be 1–1440 minutes";
+  if (!(intervalBlocks >= LIMITS.minIntervalBlocks && intervalBlocks <= LIMITS.maxIntervalBlocks)) errors.intervalMinutes = "Probe interval must be 1–30 minutes";
+
+  // A term the chosen SLA and cadence cannot possibly pay out on is refused before any premium is taken.
+  if (ctx.claimGrace !== undefined && !errors.days && !errors.intervalMinutes && Number.isFinite(blocks)) {
+    const need = minDurationBlocks(tier.uptimeBps, intervalBlocks, ctx.claimGrace);
+    if (blocks < need) {
+      errors.days = `Too short for a ${tier.uptimeLabel} SLA probed every ${minutes} min: at least ${formatDuration(need * BLOCK_SECONDS)} is needed for a claim to be possible`;
+    }
+  }
 
   const exposure = endpointOk ? exposureFor(ctx.policies, endpoint.host, ctx.holder ?? "") : { host: 0n, holder: 0n };
   const limits = ctx.tvl > 0n

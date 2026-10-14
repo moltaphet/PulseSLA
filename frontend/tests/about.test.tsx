@@ -26,6 +26,8 @@ describe("About page", () => {
     expect(screen.getByText(/absorbs the full pending reserved liability/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /not continuous pings/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /What is enforced/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /confirmed inside the term/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Terms that cannot pay are refused/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /GenLayer docs/ })).toHaveAttribute("href", "https://docs.genlayer.com");
   });
 

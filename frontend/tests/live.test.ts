@@ -5,7 +5,8 @@ import { failureReason, LiveClient, parseVotes } from "@/lib/chain/live";
 import { ATTO } from "@/lib/units";
 
 const calls: { fn: string; arg: Record<string, unknown> }[] = [];
-let receipt: Record<string, unknown> = { txExecutionResultName: "FINISHED_WITH_RETURN", result_name: "MAJORITY_AGREE" };
+const GOOD = { statusName: "ACCEPTED", txExecutionResultName: "FINISHED_WITH_RETURN", resultName: "MAJORITY_AGREE" };
+let receipt: Record<string, unknown> = { ...GOOD };
 let tx: Record<string, unknown> = { consensus_data: { votes: { "0xv1": "AGREE", "0xv2": "AGREE", "0xv3": "DISAGREE" } } };
 const reads: Record<string, unknown> = {};
 
@@ -35,7 +36,7 @@ const ME = "0x2222222222222222222222222222222222222222";
 
 beforeEach(() => {
   calls.length = 0;
-  receipt = { txExecutionResultName: "FINISHED_WITH_RETURN", result_name: "MAJORITY_AGREE" };
+  receipt = { ...GOOD };
   tx = { consensus_data: { votes: { "0xv1": "AGREE", "0xv2": "AGREE", "0xv3": "DISAGREE" } } };
   for (const k of Object.keys(reads)) delete reads[k];
   vi.clearAllMocks();
@@ -132,11 +133,29 @@ describe("LiveClient writes", () => {
   });
 
   it("raises reverts and failed consensus as errors", async () => {
-    receipt = { txExecutionResultName: "FINISHED_WITH_ERROR" };
+    receipt = { statusName: "ACCEPTED", txExecutionResultName: "FINISHED_WITH_ERROR" };
     tx = { consensus_data: { leader_receipt: [{ genvm_result: { stderr: "UserError('[EXPOSURE_CAP] per-holder exposure cap reached')" } }] } };
     await expect(new LiveClient(ADDR, provider).deposit(ME, 1n)).rejects.toThrow(/\[EXPOSURE_CAP\]/);
-    receipt = { txExecutionResultName: "FINISHED_WITH_RETURN", result_name: "DISAGREE" };
+    receipt = { ...GOOD, resultName: "MAJORITY_DISAGREE" };
     await expect(new LiveClient(ADDR, provider).deposit(ME, 1n)).rejects.toThrow(/did not reach consensus/);
+  });
+
+  // The audit's proof of concept: the SDK's canonical receipt shape, which the old code reported as a success.
+  it("rejects an UNDETERMINED / MAJORITY_DISAGREE receipt that still carries FINISHED_WITH_RETURN", async () => {
+    receipt = { statusName: "UNDETERMINED", txExecutionResultName: "FINISHED_WITH_RETURN", resultName: "MAJORITY_DISAGREE" };
+    await expect(new LiveClient(ADDR, provider).deposit(ME, 1n)).rejects.toThrow(/not accepted.*UNDETERMINED.*MAJORITY_DISAGREE/);
+  });
+
+  it("rejects a receipt that proves nothing, and one with no lifecycle status", async () => {
+    receipt = {};
+    await expect(new LiveClient(ADDR, provider).deposit(ME, 1n)).rejects.toThrow(/not accepted/);
+    receipt = { txExecutionResultName: "FINISHED_WITH_RETURN", resultName: "MAJORITY_AGREE" };
+    await expect(new LiveClient(ADDR, provider).deposit(ME, 1n)).rejects.toThrow(/not accepted/);
+  });
+
+  it("accepts FINALIZED, and snake_case receipts that carry proof", async () => {
+    receipt = { status_name: "FINALIZED", tx_execution_result_name: "FINISHED_WITH_RETURN", result_name: "MAJORITY_AGREE" };
+    await expect(new LiveClient(ADDR, provider).deposit(ME, 1n)).resolves.toMatchObject({ hash: "0xhash" });
   });
 
   it("derives probe and settle outcomes from the chain state the transaction wrote", async () => {
@@ -156,8 +175,19 @@ describe("response helpers", () => {
     expect(parseVotes({ consensus_data: { votes: {} } })).toBeUndefined();
     expect(parseVotes({})).toBeUndefined();
   });
-  it("failureReason is null for a clean receipt", () => {
-    expect(failureReason({ txExecutionResultName: "FINISHED_WITH_RETURN", result_name: "MAJORITY_AGREE" }, {})).toBeNull();
+  it("failureReason is null only for a proven success", () => {
+    expect(failureReason({ ...GOOD }, {})).toBeNull();
+    expect(failureReason({ statusName: "FINALIZED", txExecutionResultName: "FINISHED_WITH_RETURN" }, {})).toBeNull();
+  });
+  it("failureReason never reports an empty or undecided receipt as success", () => {
+    expect(failureReason({}, {})).toMatch(/not accepted/);
+    expect(failureReason({ ...GOOD, statusName: "PENDING" }, {})).toMatch(/not accepted/);
+    expect(failureReason({ statusName: "ACCEPTED" }, {})).toMatch(/no execution result/);
+    expect(failureReason({ ...GOOD, txExecutionResultName: "FINISHED_WITH_ERROR" }, {})).toMatch(/Execution failed/);
+  });
+  it("failureReason falls back to the decoded transaction for fields the receipt lacks", () => {
+    expect(failureReason({ txExecutionResultName: "FINISHED_WITH_RETURN" }, { statusName: "ACCEPTED", resultName: "MAJORITY_AGREE" })).toBeNull();
+    expect(failureReason({ ...GOOD }, { statusName: "UNDETERMINED" })).toBeNull(); // the receipt's own status wins
   });
   it("errorMessage extracts contract error codes", () => {
     expect(errorMessage(new Error("execution reverted: [INSUFFICIENT_LIQUIDITY] capital is locked"))).toBe("[INSUFFICIENT_LIQUIDITY] capital is locked");

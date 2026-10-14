@@ -19,7 +19,7 @@ export const LIMITS = {
   minDurationBlocks: 300,
   maxDurationBlocks: 2_628_000,
   minIntervalBlocks: 5,
-  maxIntervalBlocks: 7200,
+  maxIntervalBlocks: 150,
   minCoverage: 10n ** 15n,
   minDeposit: 10n ** 15n,
 } as const;
@@ -30,6 +30,12 @@ export const CAPS_BPS = { policy: 1000n, host: 2000n, holder: 2000n, utilization
 export const BREACH_CONSECUTIVE = 3;
 export const MIN_OUTAGE_SECS = 15 * 60;
 export const MIN_OUTAGE_BLOCKS = 25;
+/** A failing streak survives at most this long between failing rounds; longer silence starts a new outage. */
+export const MAX_PROBE_GAP_SECS = 3600;
+/** Probe intervals a term must leave beyond the minimum rounds, for keeper timing. */
+export const MIN_SLACK_ROUNDS = 2;
+/** While capital is locked the pool may not be left with fewer shares than this (see `withdrawableFor`). */
+export const MIN_TOTAL_SHARES = 10n ** 12n;
 export const MIN_REFERENCES = 3;
 export const MAX_REFERENCES = 4;
 export const MAX_LAG_BLOCKS = 50;
@@ -78,6 +84,40 @@ export function quotePremium(coverage: bigint, durationBlocks: number, minUptime
 /** Premium as a percentage of coverage for the whole term, in bps. */
 export function premiumRateBps(premium: bigint, coverage: bigint): number {
   return coverage === 0n ? 0 : Number((premium * BPS) / coverage);
+}
+
+const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b;
+
+/** Mirror of `_rounds_needed`: failing rounds (after the healthy baseline) needed to stage a claim at best case. */
+export function roundsNeeded(minUptimeBps: number, intervalSecs: number): number {
+  const needDown = ceilDiv((BPS - BigInt(minUptimeBps) + 1n) * BigInt(MIN_UPTIME_WINDOW_SECS), BPS);
+  const bySpan = Math.ceil(MIN_OUTAGE_SECS / intervalSecs) + 1;
+  const byDown = Number(ceilDiv(needDown, BigInt(intervalSecs)));
+  return Math.max(BREACH_CONSECUTIVE, bySpan, byDown);
+}
+
+/**
+ * Mirror of `_min_duration_blocks`: the shortest term `create_policy` accepts for an uptime target and probe
+ * interval. Below it no claim could be staged and re-verified inside the term, so the contract refuses the policy.
+ */
+export function minDurationBlocks(minUptimeBps: number, intervalBlocks: number, claimGraceSecs: number): number {
+  const interval = intervalBlocks * BLOCK_SECONDS;
+  const secs = (roundsNeeded(minUptimeBps, interval) + MIN_SLACK_ROUNDS) * interval + claimGraceSecs;
+  return Math.max(Math.floor(secs / BLOCK_SECONDS) + 1, LIMITS.minDurationBlocks);
+}
+
+/**
+ * Mirror of `_withdrawable` / the checks in `withdraw_underwriting`: the largest withdrawal the contract accepts.
+ * While capital is locked the pool must keep at least MIN_TOTAL_SHARES, so the last underwriter can never burn
+ * every share (and a freed reserve can never be captured by the next depositor).
+ */
+export function withdrawableFor(value: bigint, free: bigint, totalShares: bigint, netAssets: bigint, locked: bigint): bigint {
+  let cap = value < free ? value : free;
+  if (locked > 0n && totalShares > 0n) {
+    const room = totalShares > MIN_TOTAL_SHARES ? ((totalShares - MIN_TOTAL_SHARES) * netAssets) / totalShares : 0n;
+    if (room < cap) cap = room;
+  }
+  return cap;
 }
 
 /** Mirror of `_vested_payout`: young policies vest 25% of coverage, rising to 100% over 7 days. */

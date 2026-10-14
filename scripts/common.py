@@ -35,6 +35,55 @@ def run_lint() -> None:
         raise SystemExit("genvm-lint failed: refusing to deploy")
 
 
+class TxNotSuccessful(Exception):
+    """A transaction was decided but did not execute successfully."""
+
+
+_OK_STATUSES = ("ACCEPTED", "FINALIZED")
+
+
+def _first(*sources, keys):
+    for src in sources:
+        if isinstance(src, dict):
+            for key in keys:
+                value = src.get(key)
+                if value is not None:
+                    return value
+    return None
+
+
+def assess_receipt(receipt: dict, tx: dict | None = None) -> dict:
+    """Success only on positive proof: an ACCEPTED/FINALIZED lifecycle status,
+    a FINISHED_WITH_RETURN execution result and, when reported, a
+    MAJORITY_AGREE consensus result. `UNDETERMINED`, `MAJORITY_DISAGREE`, a
+    revert, or a receipt that proves nothing raises TxNotSuccessful.
+
+    Both naming styles are read (camelCase from the JS-style SDKs, snake_case
+    from genlayer-py). genlayer-py receipts carry the lifecycle status only as
+    `consensus_history.latestDecision.status`."""
+    sources = (receipt, tx)
+    status = _first(*sources, keys=("statusName", "status_name"))
+    if not isinstance(status, str):
+        raw = _first(*sources, keys=("status",))
+        status = raw if isinstance(raw, str) else None
+    if status is None:
+        for src in sources:
+            decision = ((src or {}).get("consensus_history") or {}).get("latestDecision") or {}
+            if isinstance(decision.get("status"), str):
+                status = decision["status"]
+                break
+    execution = _first(*sources, keys=("txExecutionResultName", "tx_execution_result_name"))
+    consensus = _first(*sources, keys=("resultName", "result_name"))
+    summary = {"status": status, "execution": execution, "consensus": consensus}
+    if status not in _OK_STATUSES:
+        raise TxNotSuccessful(f"transaction not accepted: status={status!r} consensus={consensus!r} ({summary})")
+    if execution != "FINISHED_WITH_RETURN":
+        raise TxNotSuccessful(f"transaction did not execute successfully: execution={execution!r} ({summary})")
+    if consensus is not None and consensus != "MAJORITY_AGREE":
+        raise TxNotSuccessful(f"validators did not agree: consensus={consensus!r} ({summary})")
+    return summary
+
+
 def load_schema() -> dict:
     """The contract's real ABI as reported by the linter (`genvm-lint schema`)."""
     exe = Path(sys.executable).with_name("genvm-lint")

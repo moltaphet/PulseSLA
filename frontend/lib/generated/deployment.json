@@ -1,16 +1,16 @@
 {
   "network": "studio-next",
   "rpc_url": "https://studio-next.genlayer.com/api",
-  "contract_address": "0x22119E501A483a9FF833bBf42d5C259Ee9B21E11",
+  "contract_address": "0x81ADb85f32e766f0cDD7dE80bcd03BbbF0E1E6ce",
   "source": "contracts/uptime_sla.py",
-  "source_sha256": "4215e3044ef81706b186b3ca726a1f6e7091677e05bc349f3522ce195c8008b3",
+  "source_sha256": "7746095a11204260fb168a185539d6992b1d5f9afbbbdc4bebd0752683393e7b",
   "constructor_args": {
     "activation_delay_secs": 60,
     "claim_grace_secs": 300,
     "probe_bond": "10000000000000000"
   },
-  "deployed_at": 1791899581,
-  "deploy_tx": "0x015c19040009200d795618272b7b3b97eee3c745b7125ead4241af216db03caa",
+  "deployed_at": 1791977319,
+  "deploy_tx": "0x581c721fd5c6b0e0b59800fe90a667da2fc177af94d7bef28cabf38510ec9648",
   "deployer": "0xc4DE3314A337aD0e3FbeE269f65cD7D6607DfE2B",
-  "explorer_url": "https://explorer-studio-next.genlayer.com/address/0x22119E501A483a9FF833bBf42d5C259Ee9B21E11"
+  "explorer_url": "https://explorer-studio-next.genlayer.com/address/0x81ADb85f32e766f0cDD7dE80bcd03BbbF0E1E6ce"
 }

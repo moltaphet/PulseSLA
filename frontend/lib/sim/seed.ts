@@ -39,9 +39,14 @@ export const DEMO_REGISTRY = [
 
 const TICK = 6 * 3600;
 const TICKS = 47;
+/** Rounds are 30 minutes apart (the contract's maximum interval); one more second clears the rate limit. */
+const ROUND_GAP = 1801;
+/** An outage is only a streak if its failing rounds follow each other within an hour, so outages are watched in bursts. */
+const VERTEX_BURST = 4;
+const NIMBUS_BURST = 3;
 
 export function createDemoWorld(now = Math.floor(Date.now() / 1000)): SimProtocol {
-  const total = LISTING_DELAY_SECS + 60 + 3601 + TICKS * TICK + 3700 + 1500;
+  const total = LISTING_DELAY_SECS + 60 + 3601 + TICKS * TICK + 3700 + 1500 + VERTEX_BURST * ROUND_GAP + NIMBUS_BURST * ROUND_GAP;
   const sim = new SimProtocol(now - total, DEFAULT_SIM_CONFIG, 7, DEMO_GOVERNOR);
   for (const a of [DEMO_ACCOUNT, UW_ONE, UW_TWO, KEEPER, ...OPS]) sim.fund(a, gen(1000));
 
@@ -58,7 +63,7 @@ export function createDemoWorld(now = Math.floor(Date.now() / 1000)): SimProtoco
   const make = (holder: string, endpointId: string, cov: number, uptime: number, days: number) => {
     const blocks = daysToBlocks(days);
     return sim.createPolicy(holder, {
-      endpointId, coverage: gen(cov), durationBlocks: blocks, minUptimeBps: uptime, probeIntervalBlocks: 600,
+      endpointId, coverage: gen(cov), durationBlocks: blocks, minUptimeBps: uptime, probeIntervalBlocks: 150,
     }, sim.quote(gen(cov), blocks, uptime));
   };
   make(DEMO_ACCOUNT, "helios-node", 8, GOLD, 60);
@@ -77,6 +82,13 @@ export function createDemoWorld(now = Math.floor(Date.now() / 1000)): SimProtoco
     }
   };
 
+  const burst = (n: number) => {
+    for (let i = 0; i < n; i++) {
+      sim.advance(ROUND_GAP);
+      round();
+    }
+  };
+
   sim.advance(3601); // clear every activation delay
   for (let tick = 0; tick < TICKS; tick++) {
     sim.advance(TICK);
@@ -85,15 +97,17 @@ export function createDemoWorld(now = Math.floor(Date.now() / 1000)): SimProtoco
     if (tick === 12) sim.setEndpoint(DEMO_ENDPOINTS.orbit, "ratelimited"); // throttling is inconclusive, never an outage
     if (tick === 15) sim.setEndpoint(DEMO_ENDPOINTS.orbit, "healthy");
     if (tick === 24) sim.setEndpoint(DEMO_ENDPOINTS.vertex, "down"); // a full, corroborated outage
-    if (tick === 44) sim.setEndpoint(DEMO_ENDPOINTS.nimbus, "http504"); // an outage still inside its grace period
     round();
-    if (tick === 26) {
+    if (tick === 24) {
+      burst(VERTEX_BURST); // the keeper keeps probing every half hour: the streak stages the claim
       sim.advance(3700); // grace period elapses
       sim.settleClaim(KEEPER, 4, DEFAULT_SIM_CONFIG.probeBond); // breach confirmed: payout enters its cooldown
       sim.setEndpoint(DEMO_ENDPOINTS.vertex, "healthy");
     }
     if (tick === 34) sim.releasePayout(KEEPER, 4); // part of the stream has been released; the rest is still releasable
   }
+  sim.setEndpoint(DEMO_ENDPOINTS.nimbus, "http504"); // an outage still inside its grace period
+  burst(NIMBUS_BURST);
   sim.advance(1500);
   return sim;
 }

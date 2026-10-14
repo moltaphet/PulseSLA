@@ -1,0 +1,650 @@
+[
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9000,
+  "interval_blocks": 5,
+  "min_blocks": 761
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9000,
+  "interval_blocks": 15,
+  "min_blocks": 791
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9000,
+  "interval_blocks": 25,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9000,
+  "interval_blocks": 60,
+  "min_blocks": 926
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9000,
+  "interval_blocks": 100,
+  "min_blocks": 1026
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9000,
+  "interval_blocks": 150,
+  "min_blocks": 1076
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9500,
+  "interval_blocks": 5,
+  "min_blocks": 401
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9500,
+  "interval_blocks": 15,
+  "min_blocks": 431
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9500,
+  "interval_blocks": 25,
+  "min_blocks": 451
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9500,
+  "interval_blocks": 60,
+  "min_blocks": 566
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9500,
+  "interval_blocks": 100,
+  "min_blocks": 626
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9500,
+  "interval_blocks": 150,
+  "min_blocks": 776
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9900,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9900,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9900,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9900,
+  "interval_blocks": 60,
+  "min_blocks": 326
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9900,
+  "interval_blocks": 100,
+  "min_blocks": 526
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9900,
+  "interval_blocks": 150,
+  "min_blocks": 776
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9950,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9950,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9950,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9950,
+  "interval_blocks": 60,
+  "min_blocks": 326
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9950,
+  "interval_blocks": 100,
+  "min_blocks": 526
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9950,
+  "interval_blocks": 150,
+  "min_blocks": 776
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9990,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9990,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9990,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9990,
+  "interval_blocks": 60,
+  "min_blocks": 326
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9990,
+  "interval_blocks": 100,
+  "min_blocks": 526
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9990,
+  "interval_blocks": 150,
+  "min_blocks": 776
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9999,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9999,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9999,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9999,
+  "interval_blocks": 60,
+  "min_blocks": 326
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9999,
+  "interval_blocks": 100,
+  "min_blocks": 526
+ },
+ {
+  "claim_grace": 300,
+  "uptime_bps": 9999,
+  "interval_blocks": 150,
+  "min_blocks": 776
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9000,
+  "interval_blocks": 5,
+  "min_blocks": 786
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9000,
+  "interval_blocks": 15,
+  "min_blocks": 816
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9000,
+  "interval_blocks": 25,
+  "min_blocks": 826
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9000,
+  "interval_blocks": 60,
+  "min_blocks": 951
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9000,
+  "interval_blocks": 100,
+  "min_blocks": 1051
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9000,
+  "interval_blocks": 150,
+  "min_blocks": 1101
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9500,
+  "interval_blocks": 5,
+  "min_blocks": 426
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9500,
+  "interval_blocks": 15,
+  "min_blocks": 456
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9500,
+  "interval_blocks": 25,
+  "min_blocks": 476
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9500,
+  "interval_blocks": 60,
+  "min_blocks": 591
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9500,
+  "interval_blocks": 100,
+  "min_blocks": 651
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9500,
+  "interval_blocks": 150,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9900,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9900,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9900,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9900,
+  "interval_blocks": 60,
+  "min_blocks": 351
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9900,
+  "interval_blocks": 100,
+  "min_blocks": 551
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9900,
+  "interval_blocks": 150,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9950,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9950,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9950,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9950,
+  "interval_blocks": 60,
+  "min_blocks": 351
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9950,
+  "interval_blocks": 100,
+  "min_blocks": 551
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9950,
+  "interval_blocks": 150,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9990,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9990,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9990,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9990,
+  "interval_blocks": 60,
+  "min_blocks": 351
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9990,
+  "interval_blocks": 100,
+  "min_blocks": 551
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9990,
+  "interval_blocks": 150,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9999,
+  "interval_blocks": 5,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9999,
+  "interval_blocks": 15,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9999,
+  "interval_blocks": 25,
+  "min_blocks": 300
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9999,
+  "interval_blocks": 60,
+  "min_blocks": 351
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9999,
+  "interval_blocks": 100,
+  "min_blocks": 551
+ },
+ {
+  "claim_grace": 600,
+  "uptime_bps": 9999,
+  "interval_blocks": 150,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9000,
+  "interval_blocks": 5,
+  "min_blocks": 1036
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9000,
+  "interval_blocks": 15,
+  "min_blocks": 1066
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9000,
+  "interval_blocks": 25,
+  "min_blocks": 1076
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9000,
+  "interval_blocks": 60,
+  "min_blocks": 1201
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9000,
+  "interval_blocks": 100,
+  "min_blocks": 1301
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9000,
+  "interval_blocks": 150,
+  "min_blocks": 1351
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9500,
+  "interval_blocks": 5,
+  "min_blocks": 676
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9500,
+  "interval_blocks": 15,
+  "min_blocks": 706
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9500,
+  "interval_blocks": 25,
+  "min_blocks": 726
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9500,
+  "interval_blocks": 60,
+  "min_blocks": 841
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9500,
+  "interval_blocks": 100,
+  "min_blocks": 901
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9500,
+  "interval_blocks": 150,
+  "min_blocks": 1051
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9900,
+  "interval_blocks": 5,
+  "min_blocks": 391
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9900,
+  "interval_blocks": 15,
+  "min_blocks": 421
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9900,
+  "interval_blocks": 25,
+  "min_blocks": 451
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9900,
+  "interval_blocks": 60,
+  "min_blocks": 601
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9900,
+  "interval_blocks": 100,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9900,
+  "interval_blocks": 150,
+  "min_blocks": 1051
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9950,
+  "interval_blocks": 5,
+  "min_blocks": 391
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9950,
+  "interval_blocks": 15,
+  "min_blocks": 421
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9950,
+  "interval_blocks": 25,
+  "min_blocks": 451
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9950,
+  "interval_blocks": 60,
+  "min_blocks": 601
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9950,
+  "interval_blocks": 100,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9950,
+  "interval_blocks": 150,
+  "min_blocks": 1051
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9990,
+  "interval_blocks": 5,
+  "min_blocks": 391
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9990,
+  "interval_blocks": 15,
+  "min_blocks": 421
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9990,
+  "interval_blocks": 25,
+  "min_blocks": 451
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9990,
+  "interval_blocks": 60,
+  "min_blocks": 601
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9990,
+  "interval_blocks": 100,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9990,
+  "interval_blocks": 150,
+  "min_blocks": 1051
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9999,
+  "interval_blocks": 5,
+  "min_blocks": 391
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9999,
+  "interval_blocks": 15,
+  "min_blocks": 421
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9999,
+  "interval_blocks": 25,
+  "min_blocks": 451
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9999,
+  "interval_blocks": 60,
+  "min_blocks": 601
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9999,
+  "interval_blocks": 100,
+  "min_blocks": 801
+ },
+ {
+  "claim_grace": 3600,
+  "uptime_bps": 9999,
+  "interval_blocks": 150,
+  "min_blocks": 1051
+ }
+]

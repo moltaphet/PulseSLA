@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { classify, DEFAULT_SIM_CONFIG, ProtocolError, SimProtocol } from "@/lib/sim/engine";
 import { createDemoWorld, DEMO_ACCOUNT, DEMO_GOVERNOR } from "@/lib/sim/seed";
 import {
-  LISTING_DELAY_SECS, MAX_LAG_BLOCKS, PAYOUT_COOLDOWN_SECS, PAYOUT_VEST_SECS, quotePremium, vestedPayout,
+  LISTING_DELAY_SECS, MAX_LAG_BLOCKS, minDurationBlocks, PAYOUT_COOLDOWN_SECS, PAYOUT_VEST_SECS, quotePremium, vestedPayout,
 } from "@/lib/pricing";
 import type { CreatePolicyArgs } from "@/lib/types";
 import { ATTO } from "@/lib/units";
@@ -501,9 +501,9 @@ describe("continuity and staged claims", () => {
 
   it("policies expire and free their exposure", () => {
     const sim = world();
-    const id = mint(sim, OP, { durationBlocks: 300, coverage: 10n * ATTO });
+    const id = mint(sim, OP, { durationBlocks: 400, coverage: 10n * ATTO });
     revertsWith(() => sim.expirePolicy(id), "[INVALID_STATE]");
-    sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 300 * 12);
+    sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 400 * 12);
     expect(sim.expirePolicy(id)).toBe("EXPIRED");
     mint(sim, OP, { coverage: 10n * ATTO });
     mint(sim, OP, { coverage: 10n * ATTO });
@@ -525,7 +525,7 @@ describe("vested payouts", () => {
     const holderBefore = sim.balanceOf(OP);
     const tvl = sim.metrics().tvl;
     const r = sim.settleClaim(BOT, id, BOND);
-    const expected = vestedPayout(5n * ATTO, sim.now - sim.get(id).activeFrom);
+    const expected = vestedPayout(5n * ATTO, sim.get(id).breachAt - sim.get(id).activeFrom); // frozen at staging
     expect(r).toMatchObject({ confirmed: true, payout: expected });
     expect(r.releasableFrom).toBe(sim.now + PAYOUT_COOLDOWN_SECS);
     expect(expected).toBeLessThan((5n * ATTO * 30n) / 100n);
@@ -795,5 +795,156 @@ describe("hardening mirrors the contract", () => {
     }
     expect(sim.metrics().solvent).toBe(true);
     expect(sim.metrics().owedPayouts).toBe(80n * ATTO);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Audit regressions (PulseSLA-review findings 1-4): each is the audit's proof of
+// concept, mirrored from tests/test_uptime_sla.py::TestAuditRegressions.
+// ---------------------------------------------------------------------------
+describe("audit regressions", () => {
+  const dust = 2n * 10n ** 12n;
+  const holderOf = (sim: SimProtocol, id: number) => sim.get(id);
+
+  describe("P1: orphaned capital", () => {
+    it("the last LP cannot burn every share behind a staged claim, and withdrawable is the exact boundary", () => {
+      const sim = world();
+      const id = mint(sim, OP, { coverage: 10n * ATTO });
+      stage(sim, id);
+      expect(sim.get(id).status).toBe("BREACH_PENDING");
+      const pos = sim.underwriter(UW);
+      revertsWith(() => sim.withdraw(UW, pos.value), "[INSUFFICIENT_LIQUIDITY]");
+      revertsWith(() => sim.withdraw(UW, pos.withdrawable + 1n), "[INSUFFICIENT_LIQUIDITY]");
+      sim.withdraw(UW, pos.withdrawable);
+      expect(sim.totalShares).toBeGreaterThan(0n);
+    });
+
+    it("a 0.001 GEN depositor cannot capture the reserve a dismissed claim frees", () => {
+      const sim = world();
+      const id = mint(sim, OP, { coverage: 10n * ATTO });
+      stage(sim, id);
+      sim.withdraw(UW, sim.underwriter(UW).value - dust);
+      sim.advance(GRACE + 1);
+      for (const h of [hostOf(sim, id)]) sim.setEndpoint(h, "healthy");
+      expect(sim.settleClaim(BOT, id, BOND).confirmed).toBe(false);
+      const freed = sim.metrics().tvl;
+      expect(freed).toBeGreaterThanOrEqual(10n * ATTO);
+      sim.deposit("0xa", 10n ** 15n);
+      expect(sim.underwriter("0xa").value).toBeLessThanOrEqual(10n ** 15n + 1n);
+      expect(sim.underwriter(UW).value).toBeGreaterThanOrEqual(freed - 10n ** 15n - 1n);
+    });
+
+    it("a position cannot be shrunk to a dust sliver behind a reserve", () => {
+      const sim = world();
+      const id = mint(sim, OP, { coverage: 10n * ATTO });
+      stage(sim, id);
+      revertsWith(() => sim.withdraw(UW, sim.underwriter(UW).value - 1000n), "[INSUFFICIENT_LIQUIDITY]");
+    });
+
+    it("a full exit is allowed (and leaves nothing behind) once nothing is locked", () => {
+      const sim = world();
+      sim.withdraw(UW, sim.underwriter(UW).value);
+      expect(sim.totalShares).toBe(0n);
+      expect(sim.poolAssets).toBe(0n);
+    });
+  });
+
+  describe("P1: probe gaps", () => {
+    it("failures on separate days are never one outage", () => {
+      const sim = world();
+      const id = mint(sim, OP, { probeIntervalBlocks: 150 });
+      const h = hostOf(sim, id);
+      sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 1);
+      sim.setEndpoint(h, "healthy");
+      expect(sim.triggerProbe(BOT, id, BOND).ok).toBe(true);
+      for (let day = 0; day < 3; day++) {
+        sim.advance(86_400);
+        sim.setEndpoint(h, "http502");
+        const r = sim.triggerProbe(BOT, id, BOND);
+        expect(r).toMatchObject({ verdict: "FAILING", breachStaged: false, consecutiveFailures: 1 });
+        sim.setEndpoint(h, "healthy");
+      }
+      expect(sim.get(id)).toMatchObject({ status: "ACTIVE", downtimeSecs: 3 * 1800 });
+    });
+
+    it("a streak survives a gap up to the limit and breaks one second beyond it", () => {
+      const sim = world();
+      const id = mint(sim, OP, { probeIntervalBlocks: 150 });
+      const h = hostOf(sim, id);
+      sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 1);
+      sim.setEndpoint(h, "healthy");
+      sim.triggerProbe(BOT, id, BOND);
+      sim.setEndpoint(h, "http502");
+      sim.advance(1801);
+      expect(sim.triggerProbe(BOT, id, BOND).consecutiveFailures).toBe(1);
+      sim.advance(3600);
+      expect(sim.triggerProbe(BOT, id, BOND).consecutiveFailures).toBe(2);
+      sim.advance(3601);
+      expect(sim.triggerProbe(BOT, id, BOND).consecutiveFailures).toBe(1);
+    });
+  });
+
+  describe("P2: settlement delay and post-expiry observation", () => {
+    it("waiting after expiry can neither inflate nor confirm a stale claim", () => {
+      const sim = world();
+      const cov = 10n * ATTO;
+      const id = mint(sim, OP, { coverage: cov, durationBlocks: 500, minUptimeBps: 9900, probeIntervalBlocks: 25 });
+      stage(sim, id);
+      expect(sim.get(id).status).toBe("BREACH_PENDING");
+      const first = vestedPayout(cov, holderOf(sim, id).breachAt - holderOf(sim, id).activeFrom);
+      expect(first).toBeLessThan(cov);
+      sim.setEndpoint(hostOf(sim, id), "healthy");
+      sim.advance(7 * 86_400);
+      sim.setEndpoint(hostOf(sim, id), "http502");
+      revertsWith(() => sim.settleClaim(BOT, id, BOND), "[INVALID_STATE]");
+      revertsWith(() => sim.triggerProbe(BOT, id, BOND), "[INVALID_STATE]");
+      expect(sim.expirePolicy(id)).toBe("LAPSED");
+      expect(sim.metrics().reservedPayouts).toBe(0n);
+    });
+
+    it("an in-term settlement delay does not raise the payout", () => {
+      const sim = world();
+      const cov = 10n * ATTO;
+      const id = mint(sim, OP, { coverage: cov });
+      stage(sim, id);
+      const p = sim.get(id);
+      const expected = vestedPayout(cov, p.breachAt - p.activeFrom);
+      sim.advance(5 * 86_400);
+      const r = sim.settleClaim(BOT, id, BOND);
+      expect(r).toMatchObject({ confirmed: true, payout: expected });
+      expect(expected).toBeLessThan(vestedPayout(cov, sim.now - p.activeFrom));
+    });
+  });
+
+  describe("P2: unpayable terms", () => {
+    it("rejects a term too short for the SLA and cadence, and accepts exactly the minimum", () => {
+      const sim = world();
+      revertsWith(() => mint(sim, OP, { durationBlocks: 300, minUptimeBps: 9000, probeIntervalBlocks: 150 }), "[INVALID_PARAMS]");
+      revertsWith(() => mint(sim, OP, { durationBlocks: 300, probeIntervalBlocks: 7200 }), "[INVALID_PARAMS]");
+      const need = minDurationBlocks(9000, 150, GRACE);
+      revertsWith(() => mint(sim, OP, { durationBlocks: need - 1, minUptimeBps: 9000, probeIntervalBlocks: 150 }), "[INVALID_PARAMS]");
+      expect(mint(sim, OP, { durationBlocks: need, minUptimeBps: 9000, probeIntervalBlocks: 150 })).toBeGreaterThan(0);
+    });
+
+    it.each([[9000, 150], [9500, 150], [9900, 25], [9990, 5], [9999, 60]])(
+      "the minimum term for %i bps every %i blocks can actually be paid out",
+      (uptime, interval) => {
+        const sim = world();
+        const id = mint(sim, OP, { durationBlocks: minDurationBlocks(uptime, interval, GRACE), minUptimeBps: uptime, probeIntervalBlocks: interval });
+        const h = hostOf(sim, id);
+        sim.advance(DEFAULT_SIM_CONFIG.activationDelay + 1);
+        sim.setEndpoint(h, "healthy");
+        expect(sim.triggerProbe(BOT, id, BOND).ok).toBe(true);
+        sim.setEndpoint(h, "http502");
+        let staged = false;
+        for (let i = 0; i < 200 && !staged; i++) {
+          sim.advance(interval * 12);
+          staged = sim.triggerProbe(BOT, id, BOND).breachStaged;
+        }
+        expect(staged).toBe(true);
+        sim.advance(GRACE);
+        expect(sim.settleClaim(BOT, id, BOND).confirmed).toBe(true);
+      },
+    );
   });
 });

@@ -211,6 +211,22 @@
     "returns": "array"
   },
   {
+    "name": "min_insurable_duration",
+    "inputs": [
+      {
+        "name": "min_uptime_bps",
+        "type": "int"
+      },
+      {
+        "name": "probe_interval_blocks",
+        "type": "int"
+      }
+    ],
+    "readonly": true,
+    "payable": false,
+    "returns": "int"
+  },
+  {
     "name": "quote_premium",
     "inputs": [
       {

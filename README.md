@@ -7,13 +7,15 @@ PulseSLA is parametric downtime insurance for Web3 infrastructure: public RPC pr
 | | |
 |---|---|
 | **Network** | GenLayer Studio Next, chain ID `61997` |
-| **Source** | [`contracts/uptime_sla.py`](contracts/uptime_sla.py) (v0.4.0), GenVM runner `py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng` |
-| **Contract** | [`0x22119E501A483a9FF833bBf42d5C259Ee9B21E11`](https://explorer-studio-next.genlayer.com/address/0x22119E501A483a9FF833bBf42d5C259Ee9B21E11), v0.4.0, deployed 2026-10-13 with a 60 s activation delay, 300 s claim grace and 0.01 GEN probe bond |
-| **Registry** | five listings: `publicnode-eth`, `cloudflare-eth`, `drpc-eth`, `tenderly-eth`, `flashbots-eth` (Ethereum mainnet, chain 1). Each was authenticated by consensus `eth_chainId`. They become insurable 24 h after listing |
-| **Previous deployment** | [`0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8`](https://explorer-studio-next.genlayer.com/address/0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8): the pre-registry build (v0.3.0), superseded |
-| **Records** | [`deployments/studio-next.json`](deployments/studio-next.json) describes the v0.4.0 deployment. The v0.3.0 live verification is archived under [`deployments/archive/`](deployments/archive/) and does not cover v0.4.0 |
+| **Source** | [`contracts/uptime_sla.py`](contracts/uptime_sla.py) (v0.4.1), GenVM runner `py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng` |
+| **Contract** | [`0x81ADb85f32e766f0cDD7dE80bcd03BbbF0E1E6ce`](https://explorer-studio-next.genlayer.com/address/0x81ADb85f32e766f0cDD7dE80bcd03BbbF0E1E6ce), v0.4.1 (audit hardening), deployed 2026-10-14 with a 60 s activation delay, 300 s claim grace and 0.01 GEN probe bond. The source's header comment still reads `v0.4.0` so that its sha256 stays identical to the deployed source |
+| **Registry** | five listings, registered on the v0.4.1 contract (each tx `ACCEPTED`, `FINISHED_WITH_RETURN`, `MAJORITY_AGREE`): `publicnode-eth`, `cloudflare-eth`, `drpc-eth`, `tenderly-eth`, `flashbots-eth` (Ethereum mainnet, chain 1). Each was authenticated by consensus `eth_chainId`. They become insurable 24 h after listing |
+| **Previous deployments** | [`0x22119E50…1E11`](https://explorer-studio-next.genlayer.com/address/0x22119E501A483a9FF833bBf42d5C259Ee9B21E11) (v0.4.0, superseded by the audit fixes below) and [`0xDFB967aA…CCD8`](https://explorer-studio-next.genlayer.com/address/0xDFB967aAa3aecFf5600B9BB734D91536a6B9CCD8) (pre-registry v0.3.0) |
+| **Records** | [`deployments/studio-next.json`](deployments/studio-next.json) describes the v0.4.1 deployment. The v0.3.0 live verification is archived under [`deployments/archive/`](deployments/archive/) and does not cover v0.4.0 |
 
 > **v0.4.0: authenticated-infrastructure build.** This revision answers the hackathon steward's rejection ("a policyholder can insure an endpoint they control, choose the observations that establish a breach, and receive a vested payout without any independent proof"). See [§3 Authenticated Infrastructure & Exploit Mitigation](#3-authenticated-infrastructure--exploit-mitigation). It is deployed to Studio Next (above) and the dashboard in `frontend/` has been migrated to the new ABI. See [§6](#6-verification-what-is-proven-and-what-is-not) for what has and has not been exercised live.
+>
+> **v0.4.1: audit hardening.** An independent review of v0.4.0 (`4abf89c`) found two P1 and four P2 issues, all fixed here with a regression test each (see [§6](#6-verification-what-is-proven-and-what-is-not)): (1) the last LP could burn every share behind a staged claim and a new depositor then captured the freed reserve; (2) failures days apart were summed into one multi-day outage; (3) waiting after expiry raised the payout and let an unrelated later failure confirm a stale claim; (4) terms that could never produce a claim were sold; (5) the live client reported an `UNDETERMINED` / `MAJORITY_DISAGREE` receipt as success; (6) account A's position stayed visible under account B. **Behaviour changes:** probe interval is now capped at **150 blocks (30 min)**; `create_policy` rejects terms shorter than `min_insurable_duration(uptime, interval)`; a staged claim must be confirmed inside the policy term; the payout age-ramp is frozen where the breach was staged.
 >
 > **Breaking changes.** `create_policy(endpoint_id, coverage_amount, duration_blocks, min_uptime_bps, probe_interval_blocks)` replaces the earlier URL-based signature; the policy binds only to a registry endpoint and the enforced metrics in [§7](#7-enforced-coverage). `settle_claim` now *confirms* a breach and starts vesting; the new `release_payout` pays it out.
 
@@ -90,17 +92,20 @@ The review describes a **self-attack**: the insured party is also the insured se
 
 ### How each element of the attack is closed
 
-| Attack element | Mitigation in v0.4.0 | Where it is enforced | Test that proves it |
+| Attack element | Mitigation in v0.4.x | Where it is enforced | Test that proves it |
 |---|---|---|---|
 | **Insure an endpoint the holder controls** | There is no URL input. `create_policy` takes an `endpoint_id` that must exist in the governor-curated registry; anything else reverts `[UNAUTHENTICATED_ENDPOINT]`. A listed provider's own URL is not accepted as a handle either. | `create_policy`, `register_endpoint` | `TestMoralHazard::test_an_attempt_to_insure_an_unauthenticated_arbitrary_endpoint_fails`, `TestCreatePolicy::test_unauthenticated_endpoints_cannot_be_insured`, `test_the_legacy_url_signature_is_gone` |
 | **Get their own endpoint listed** | Only the governor can list. The governor cannot hold policies. A new listing is neither insurable nor a reference for 24 h, so LPs have a full day to exit if a listing is hostile. | `_only_governor`, `LISTING_DELAY_SECS` | `test_a_holder_cannot_add_their_own_endpoint_to_the_registry`, `test_a_freshly_listed_endpoint_cannot_be_insured_immediately_…`, `test_the_governor_cannot_collect_on_infrastructure_it_lists` |
 | **List something that is not what it claims** | A listing must carry `sha256("pulsesla/v1\|id\|provider\|domain\|chain_id\|url")`, the URL must be https, public and under the declared *registrable* domain, and a **consensus `eth_chainId`** must equal the declared chain. Unreachable or garbage endpoints cannot be listed. | `register_endpoint` | `TestRegistry` (16 invalid-listing cases, chain-id mismatch, unreachable endpoint) |
 | **Report an outage only the holder can see** | Every round also measures ≥3 *independent* reference providers on the same chain (distinct registrable domains, never the insured provider). If fewer than a strict majority of references answer, the round is `INCONCLUSIVE` and counts for nothing, so an observer-side or localized outage is never attributed to the provider. | `_classify`, `_round` | `test_observer_side_outage_is_inconclusive_…`, `test_a_localized_observation_without_reference_corroboration_is_discarded`, `test_a_provider_outage_correlated_with_the_references_is_not_paid` |
 | **Forge or poison the leader's report** | Validators re-measure the target **and every reference** themselves, recompute the verdict from the leader's raw observations, and require the *same* verdict. The reference set must match exactly (a leader cannot drop an inconvenient reference). Reported heights are bounded against the validator's own reading, so a fabricated reference head cannot manufacture staleness. | `_round_agrees` | `TestValidatorConsensus`, `TestByzantineLeader` |
+| **Revive a stale claim after the term** | No probe or settlement is accepted from `expires_at`; a staged claim must be confirmed inside the term (otherwise `expire_policy` lapses it and frees the reserve); a claim whose re-verification could not fall inside the term is never staged. | `trigger_probe`, `settle_claim`, `expire_policy`, `_maybe_stage_breach` | `test_waiting_after_expiry_cannot_inflate_or_confirm_a_stale_claim`, `test_a_claim_that_cannot_be_reverified_in_term_is_not_staged` |
+| **Buy a policy that can never pay** | `create_policy` refuses any term shorter than the time needed for a healthy baseline, the failing rounds the chosen SLA requires, the claim grace and two rounds of slack (`min_insurable_duration`, also exposed as a view and mirrored in the form). | `_min_duration_blocks`, `create_policy` | `test_every_accepted_minimum_term_is_actually_payable`, `test_term_too_short_for_the_chosen_sla_is_rejected_before_premium` |
+| **Walk away with capital that still backs cover** | While any coverage, claim or payout is outstanding the pool must keep at least 10¹² shares, so the last underwriter can never burn every share and a freed reserve is never ownerless; `get_underwriter().withdrawable` is exactly what the contract accepts. | `withdraw_underwriting`, `_withdrawable` | `test_last_lp_cannot_burn_every_share_behind_a_staged_claim`, `test_new_depositor_cannot_capture_released_reserve`, `test_reported_withdrawable_is_exactly_what_the_contract_accepts` |
 | **Trigger a payout from one report** | One failing round, even corroborated, stages nothing. A claim needs ≥3 consecutive `FAILING` rounds spanning ≥15 minutes **and** ≥25 blocks of *reference-chain* progress, a grace period, and a fresh corroborated round. `settle_claim` with no staged claim reverts. | `_maybe_stage_breach`, `settle_claim` | `test_a_single_uncorroborated_report_cannot_trigger_an_insurance_payout`, `TestClaims::test_the_outage_must_span_real_reference_chain_progress` |
-| **Choose the moment and the sample** | Uptime is time-weighted, not a ratio of the holder's samples: each corroborated failing round counts one probe interval of downtime, against the elapsed window floored at 24 h. Unprobed time counts as *up*. Probing only during failures cannot shrink the denominator. | `_uptime_bps` | `test_uptime_is_judged_on_a_floored_window_…`, `test_unprobed_healthy_history_dilutes_a_short_outage`, `test_a_brief_blip_chosen_by_the_holder_is_not_a_breach` |
+| **Choose the moment and the sample** | Uptime is time-weighted, not a ratio of the holder's samples: each corroborated failing round counts at most one probe interval (itself capped at 30 min) of downtime, against the elapsed window floored at 24 h. Unprobed time counts as *up*. Probing only during failures cannot shrink the denominator. **A failing streak is continuous only if each failing round follows the previous one within 1 h; a longer silence starts a new outage**, so isolated blips on different days never add up. | `_uptime_bps` | `test_uptime_is_judged_on_a_floored_window_…`, `test_unprobed_healthy_history_dilutes_a_short_outage`, `test_a_brief_blip_chosen_by_the_holder_is_not_a_breach` |
 | **Induce a "failure" by throttling** | HTTP 429 is `INCONCLUSIVE`, not an outage: throttling is not a representative provider failure. | `_observe`, `_classify` | `test_rate_limit_flooding_cannot_manufacture_a_breach` |
-| **Collect a vested payout instantly** | Confirmation moves no funds. The payout is parked as a reserved liability, nothing is releasable for 24 h, then it streams linearly over 3 days. On top of that: age ramp (25%→100% over 7 days), per-epoch ceiling (30% of the pool), and exposure caps. | `_begin_vesting`, `release_payout` | `test_payouts_cannot_instantly_drain_the_pool`, `test_payout_streams_after_a_cooldown_…`, `TestClaimVelocity` |
+| **Collect a vested payout instantly** | Confirmation moves no funds. The payout is parked as a reserved liability, nothing is releasable for 24 h, then it streams linearly over 3 days. On top of that: age ramp (25%→100% over 7 days, **frozen at the moment the breach was staged**, so waiting to settle never raises it), per-epoch ceiling (30% of the pool), and exposure caps. | `_begin_vesting`, `release_payout` | `test_payouts_cannot_instantly_drain_the_pool`, `test_payout_streams_after_a_cooldown_…`, `TestClaimVelocity` |
 
 ### The registry: what "authenticated" means, precisely
 
@@ -184,7 +189,7 @@ An LP who redeems shares during a staged claim absorbs the **full** pending rese
 
 #### Measurement and liveness
 
-- **Rounds come from transactions, not a heartbeat.** A round happens only when someone submits `trigger_probe`, no more often than the policy's interval. An outage between rounds is invisible, and nothing is detected if nobody probes. The incentive to probe is the refunded bond on a found failure and the underwriters' and holders' own interest in running keepers. Because unprobed time counts as *up*, a lazy keeper hurts the holder, never the underwriters.
+- **Rounds come from transactions, not a heartbeat.** A round happens only when someone submits `trigger_probe`, no more often than the policy's interval. An outage between rounds is invisible, and nothing is detected if nobody probes. The incentive to probe is the refunded bond on a found failure and the underwriters' and holders' own interest in running keepers. Because unprobed time counts as *up* and a streak cannot span a silence longer than an hour, a lazy keeper hurts the holder, never the underwriters. The residual: a keeper who probes only at moments a provider fails, with rounds under an hour apart, observes real failures at those moments; the corroboration requirement (a validator majority and the references must independently see the failure) is what makes a one-second blip hard to catch.
 - **Strict corroboration can reduce liveness.** If a validator's references disagree with the leader's beyond the height bounds (a load-balanced backend 11+ blocks apart), the round is rejected and retried with another leader.
 - **Provider-side rate limiting is not an outage.** `429` is `INCONCLUSIVE`, which also means a provider that throttles the validators specifically cannot be claimed against.
 - **Domain grouping is an approximation.** A full Public Suffix List cannot be embedded in a contract; the contract uses the last two labels plus a built-in list of common multi-label and hosting-platform suffixes.
@@ -211,12 +216,15 @@ An LP who redeems shares during a staged claim absorbs the **full** pending rese
 | References per round | 3 required, up to 4 used; strict majority must be healthy |
 | Staleness tolerance | 50 blocks behind the reference head |
 | Policy duration | 300 to 2,628,000 blocks (≈ 1 hour to 1 year, 12 s blocks) |
-| Probe interval | 5 to 7,200 blocks (≈ 1 minute to 1 day) |
+| Probe interval | 5 to 150 blocks (≈ 1 to 30 minutes) |
+| Failing-streak gap | a streak ends if more than 1 h passes between failing rounds |
+| Minimum term | `max(300 blocks, (rounds + 2) × interval + claim grace)`, where `rounds` is what the SLA needs (see `min_insurable_duration`) |
 | Uptime floor | 90.00% to 99.99% |
 | Breach rule | ≥ 3 consecutive `FAILING` rounds spanning ≥ 15 min and ≥ 25 reference blocks, uptime below floor |
 | Uptime measurement | downtime ÷ max(elapsed, 24 h) over a 30-day window; unprobed time counts as up |
-| Settlement window | 14 days after grace, then the claim lapses and `expire_policy` releases the capital |
-| Payout ramp | 25% → 100% linearly over 7 days of policy age |
+| Settlement window | grace → the earlier of the policy's `expires_at` and 14 days; after that the claim lapses and `expire_policy` releases the capital |
+| Payout ramp | 25% → 100% linearly over 7 days of policy age, measured at the moment the breach was staged |
+| Pool floor while locked | ≥ 10¹² shares must remain while any coverage, claim or payout is outstanding |
 | Payout vesting | 24 h cooldown, then linear over 3 days |
 | Claim velocity | 24 h epochs; confirmations capped at 30% of pool assets per epoch (first of an epoch always allowed) |
 | Block-height bound | leader ≤ validator + 2 and ≥ validator − 10; heights above 2⁵³ rejected |
@@ -225,7 +233,7 @@ An LP who redeems shares during a staged claim absorbs the **full** pending rese
 
 ### Stack
 
-Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Underwrite, Marketplace, Sentinel, Incidents, About. The dashboard speaks the v0.4.0 ABI: policies are bought by choosing a registry id (there is no URL input), probes show the corroborated verdict, reference head and outage continuity, and a confirmed claim shows its vesting progress with a *Release payout* action.
+Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Underwrite, Marketplace, Sentinel, Incidents, About. The dashboard speaks the v0.4.1 ABI: policies are bought by choosing a registry id (there is no URL input), the form refuses terms the contract would refuse (shortest insurable term, 30-minute maximum interval), account-specific panels are keyed to the connected wallet and purge on `accountsChanged`, a transaction is a success only with an `ACCEPTED`/`FINALIZED` status and `FINISHED_WITH_RETURN`, probes show the corroborated verdict, reference head and outage continuity, and a confirmed claim shows its vesting progress with a *Release payout* action.
 
 ## 6. Verification: what is proven, and what is not
 
@@ -234,9 +242,11 @@ Frontend: Next.js 16, React 19, Tailwind 4, TypeScript, `genlayer-js`. Pages: Un
 | Check | Result |
 |---|---|
 | `genvm-lint check` (lint + GenVM validation) and `genvm-lint typecheck` | **0 errors** (with a GenVM bundle that ships the pinned runner; see §8) |
-| Contract tests (`pytest`, genlayer-test direct mode) | **204 passing** |
+| Contract tests (`pytest`, genlayer-test direct mode) | **224 passing** (204 prior + 20 audit regressions) |
+| Script receipt assessment (`tests/test_receipts.py`) | **11 passing** |
+| Frontend tests (`npm test`) | **572 passing**, incl. 108 parity rows for the minimum term generated from the real contract |
 | `scripts/simulate_outage.py` scenarios `outage`, `flap`, `attack` | all checks pass |
-| Test suite sensitivity | removing the reference quorum, the outage-duration/block continuity rule, or the vesting cooldown each makes the adversarial tests fail |
+| Test suite sensitivity | removing the reference quorum, the outage-duration/block continuity rule, the vesting cooldown, the last-LP guard, the streak-gap reset, the frozen age-ramp, the post-expiry rejection or the minimum-term check each makes its test fail (mutation-checked) |
 
 **Contract tests** cover deposit/withdraw arithmetic and rounding, premium formulas, **the registry** (listing validation, commitment hash, chain authentication, listing delay, delisting, reference independence, capacity, governance), policy creation and caps, expiry, **corroborated rounds** (healthy, each HTTP failure, unreachable, rate-limited, stale, malformed payloads, observer-side outage, reference quorum, outlier references), the real validator function (agreement, disagreement, forged/malformed/poisoned leader results, dropped or swapped references), staged claims with continuity rules, **payout vesting** (cooldown, linear release, holder-only payment, solvency), and the **adversarial moral-hazard suite**:
 
@@ -249,11 +259,13 @@ Plus the solvency invariant under simultaneous breach of every policy paid acros
 
 ### Not verified
 
-- **Deployed, but only partly exercised live.** The v0.4.0 contract is on Studio Next and its four-plus-one registry listings were accepted by consensus (`FINISHED_WITH_RETURN`, `MAJORITY_AGREE`). Beyond that, nothing has run on the chain: no policy, probe, claim or release. The listing delay (24 h) has to pass first, and `scripts/verify_live.py` has not been run.
-- **On-chain reads could not be checked.** After deployment, Studio Next's `gen_call` read endpoint failed for every contract, including the previous one (`Can't reconnect until invalid transaction is rolled back`). The registrations were therefore made by sending the transactions directly, and the listings have **not been read back** from the contract. The live dashboard cannot read state until that endpoint recovers; demo mode (`NEXT_PUBLIC_PULSESLA_MODE=demo`) is unaffected.
+- **Deployed, but only partly exercised live.** The v0.4.1 contract is on Studio Next and its five registry listings were accepted by consensus (`ACCEPTED`, `FINISHED_WITH_RETURN`, `MAJORITY_AGREE`, asserted by `assess_receipt`). Beyond that, nothing has run on the chain: no policy, probe, claim or release. The listing delay (24 h) has to pass first, and `scripts/verify_live.py` has not been run.
+- **On-chain reads could not be checked.** After the v0.4.1 deployment, Studio Next's `gen_call` read endpoint again failed (`Can't reconnect until invalid transaction is rolled back`). The registrations were therefore made with `scripts/register_endpoints.py --skip-reads`, which sends the transactions without reading the contract, and the listings have **not been read back** from the contract. The live dashboard cannot read state until that endpoint recovers; demo mode (`NEXT_PUBLIC_PULSESLA_MODE=demo`) is unaffected.
 - **1RPC was rejected by the validators.** `https://1rpc.io/eth` answered `eth_chainId` from a developer machine, but the Studio validators did not agree on it (`MAJORITY_DISAGREE`), so it is not listed. Tenderly's public gateway and Flashbots replaced it. This is exactly the kind of validator-side behaviour the earlier unit tests cannot show.
-- **Frontend verified against its own port only.** The dashboard's 440 tests run against an in-memory port of the v0.4.0 contract, plus the parity fixtures generated from the real contract (premiums). They have not been run against the deployed contract.
+- **Frontend verified against its own port only.** The dashboard's 572 tests run against an in-memory port of the v0.4.1 contract, plus the parity fixtures generated from the real contract (premiums and minimum terms). They have not been run against the deployed contract.
 - **Live provider behaviour.** Of the default manifest, the five listed providers were authenticated by consensus `eth_chainId` only. Real validators' views of `eth_blockNumber` on them, their rate limits and height drift have not been observed.
+- **The audit fixes are proven in the direct-mode harness and the in-memory port, not by live consensus.** Each of the six findings has a regression test that fails when its fix is removed, but none has been replayed against Studio Next because live reads are unavailable.
+- **Residual: strict term ends can strand a congested claim.** A staged claim must be confirmed inside the policy term. Under a mass outage the 30%-per-epoch velocity ceiling can push a claim past `expires_at` of a short policy, and it then lapses. This is deliberate (an observation after the term is never accepted) and favours underwriters; long terms are unaffected.
 - `scripts/deploy.py` locates the new contract address in the receipt on a best-effort basis.
 
 ## 7. Enforced coverage
@@ -287,7 +299,7 @@ export GENVM_VERSION=v0.6.0-rc8
 
 genvm-lint check contracts/uptime_sla.py          # lint + GenVM validation
 genvm-lint typecheck contracts/uptime_sla.py
-python -m pytest tests -q                         # 204 tests
+python -m pytest tests -q                         # 235 tests (224 contract + 11 receipt)
 python -m pytest tests -q -k "MoralHazard"        # the adversarial suite only
 
 # In-memory end-to-end simulations (the contract's real leader and validator code)
@@ -346,6 +358,6 @@ The dashboard is **live** by default against the address in `frontend/lib/genera
 contracts/uptime_sla.py   the intelligent contract (registry · corroboration · vesting)
 tests/                    contract tests (conftest.py: simulated multi-provider network)
 scripts/                  deploy · register endpoints · live verification · simulation · parity export
-deployments/              address, ABI, receipts (studio-next.json = v0.4.0)
-frontend/                 Next.js dashboard (v0.4.0 ABI; in-memory port of the contract for demo mode and tests)
+deployments/              address, ABI, receipts (studio-next.json = v0.4.1)
+frontend/                 Next.js dashboard (v0.4.1 ABI; in-memory port of the contract for demo mode and tests)
 ```

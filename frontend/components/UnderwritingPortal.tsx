@@ -7,7 +7,7 @@ import { formatBps, formatGen, formatDuration, ATTO } from "@/lib/units";
 import { Button, Card, Dot, EmptyState, Field, Meter, Pill, Row, Segmented, Stat } from "./ui";
 
 export function UnderwritingPortal() {
-  const { metrics, position, balance, canTransact, deposit, withdraw, loading, mode, tx } = useProtocol();
+  const { metrics, position, balance, canTransact, blockedReason, personalStatus, deposit, withdraw, loading, mode, tx } = useProtocol();
   const [tab, setTab] = useState<"deposit" | "withdraw">("deposit");
   const [input, setInput] = useState("");
   const busy = tx.phase === "pending";
@@ -83,8 +83,9 @@ export function UnderwritingPortal() {
               </dl>
             )}
             <Button type="submit" variant="capital" className="w-full" loading={busy} disabled={check.amount === null || !canTransact || frozen}>
-              {frozen ? "Deposits frozen: claim pending" : !canTransact ? "Connect a wallet to continue" : tab === "deposit" ? "Deposit to pool" : "Withdraw from pool"}
+              {frozen ? "Deposits frozen: claim pending" : !canTransact ? (blockedReason ?? "Connect a wallet to continue") : tab === "deposit" ? "Deposit to pool" : "Withdraw from pool"}
             </Button>
+            {personalStatus === "error" && <p role="alert" className="text-xs text-danger">{blockedReason}</p>}
             {mode === "live" && <p className="text-xs text-faint">Writes go through GenLayer consensus and take a few seconds to be decided.</p>}
           </form>
         </Card>

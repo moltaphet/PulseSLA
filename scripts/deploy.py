@@ -27,8 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.common import (
     CONTRACT, DEFAULT_ACTIVATION_SECS, DEFAULT_GRACE_SECS, DEFAULT_PROBE_BOND, DEPLOYMENTS,
-    FRONTEND_GENERATED, NETWORKS, ROOT, abi_from_schema, load_account, load_schema, make_client,
-    policy_fees, run_lint,
+    FRONTEND_GENERATED, NETWORKS, ROOT, TxNotSuccessful, abi_from_schema, assess_receipt, load_account, load_schema,
+    make_client, policy_fees, run_lint,
 )
 
 MIN_BALANCE_WEI = 5 * 10**18
@@ -108,9 +108,10 @@ def main() -> None:
     print(f"deploy tx {tx_hash} -> waiting for consensus...")
     receipt = client.wait_for_transaction_receipt(tx_hash, wait_until="decided", interval=4, retries=120)
     tx = client.get_transaction(tx_hash)
-    status = receipt.get("txExecutionResultName") or receipt.get("tx_execution_result_name")
-    if status not in (None, "FINISHED_WITH_RETURN"):
-        raise SystemExit(f"deployment failed: {status}\n{json.dumps(receipt, default=str)[:1500]}")
+    try:
+        assess_receipt(receipt, tx)
+    except TxNotSuccessful as exc:
+        raise SystemExit(f"deployment failed: {exc}\n{json.dumps(receipt, default=str)[:1500]}")
     address = _contract_address(receipt, tx)
     if address is None:
         raise SystemExit(f"deployed, but no contract address found in receipt:\n{json.dumps(receipt, default=str)[:1500]}")

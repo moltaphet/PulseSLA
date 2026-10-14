@@ -7,9 +7,9 @@
  */
 import {
   apexOf, BREACH_CONSECUTIVE, CAPS_BPS, EPOCH_SECONDS, LIMITS, LISTING_DELAY_SECS, MAX_BLOCK_DRIFT, MAX_EPOCH_PAYOUT_BPS,
-  MAX_LAG_BLOCKS, MAX_REFERENCES, MEASUREMENT_WINDOW_SECS, MIN_OUTAGE_BLOCKS, MIN_OUTAGE_SECS, MIN_REFERENCES,
-  MIN_UPTIME_WINDOW_SECS, PAYOUT_COOLDOWN_SECS, PAYOUT_VEST_SECS, quotePremium, releasableBy, SETTLE_WINDOW_SECONDS,
-  validateEndpointUrl, vestedPayout, hostnameOf,
+  MAX_LAG_BLOCKS, MAX_PROBE_GAP_SECS, MAX_REFERENCES, MEASUREMENT_WINDOW_SECS, MIN_OUTAGE_BLOCKS, MIN_OUTAGE_SECS,
+  MIN_REFERENCES, MIN_TOTAL_SHARES, MIN_UPTIME_WINDOW_SECS, minDurationBlocks, PAYOUT_COOLDOWN_SECS, PAYOUT_VEST_SECS,
+  quotePremium, releasableBy, SETTLE_WINDOW_SECONDS, validateEndpointUrl, vestedPayout, hostnameOf, withdrawableFor,
 } from "../pricing";
 import type {
   ConsensusVote, CreatePolicyArgs, Endpoint, Incident, IncidentKind, Policy, PolicyStatus, PoolMetrics,
@@ -142,6 +142,7 @@ export class SimProtocol {
   private windowStarted = new Map<number, number>();
   private durations = new Map<number, number>();
   private outageStartHead = new Map<number, number>();
+  private lastFailAt = new Map<number, number>();
   private rng: () => number;
 
   constructor(startTime: number, cfg: SimConfig = DEFAULT_SIM_CONFIG, seed = 7, governor = "0x00000000000000000000000000000000000000a1") {
@@ -287,8 +288,11 @@ export class SimProtocol {
     if (this.stagedReserved() > 0n) throw new ProtocolError(E.frozen, "a staged claim is reserved; deposits reopen when it settles");
     const net = this.netAssets();
     let minted: bigint;
-    if (this.totalShares === 0n) minted = amount;
-    else {
+    if (this.totalShares === 0n) {
+      // Unreachable by construction; a depositor must never be handed capital nobody owns.
+      if (this.poolAssets !== 0n || this.lockedCoverage !== 0n) throw new ProtocolError(E.state, "pool holds capital with no shareholders; deposits closed");
+      minted = amount;
+    } else {
       if (net === 0n) throw new ProtocolError(E.state, "pool has no assets; deposits closed");
       minted = (amount * this.totalShares) / net;
     }
@@ -311,6 +315,10 @@ export class SimProtocol {
     if (amount > free) throw new ProtocolError(E.liquidity, "capital is locked behind active coverage");
     let burn = (amount * this.totalShares + net - 1n) / net;
     if (burn > held) burn = held;
+    // While capital is locked the pool may not be left empty or dust-sized: the last underwriter keeps a real position.
+    if (this.lockedCoverage > 0n && this.totalShares - burn < MIN_TOTAL_SHARES) {
+      throw new ProtocolError(E.liquidity, "withdrawal would leave a dust-sized (or empty) pool while coverage, claims or payouts are outstanding");
+    }
     this.shares.set(sender, held - burn);
     this.totalShares -= burn;
     this.poolAssets -= amount;
@@ -322,7 +330,7 @@ export class SimProtocol {
     const s = this.shares.get(addr) ?? 0n;
     const value = this.totalShares > 0n ? (s * this.netAssets()) / this.totalShares : 0n;
     const free = this.poolAssets > this.lockedCoverage ? this.poolAssets - this.lockedCoverage : 0n;
-    return { shares: s, value, withdrawable: value < free ? value : free };
+    return { shares: s, value, withdrawable: withdrawableFor(value, free, this.totalShares, this.netAssets(), this.lockedCoverage) };
   }
 
   // ---------------------------------------------------------------- policies
@@ -343,6 +351,10 @@ export class SimProtocol {
     if (a.durationBlocks < LIMITS.minDurationBlocks || a.durationBlocks > LIMITS.maxDurationBlocks) throw new ProtocolError(E.params, "duration out of range");
     if (a.minUptimeBps < LIMITS.minUptimeBps || a.minUptimeBps > LIMITS.maxUptimeBps) throw new ProtocolError(E.params, "min_uptime_bps out of range");
     if (a.probeIntervalBlocks < LIMITS.minIntervalBlocks || a.probeIntervalBlocks > LIMITS.maxIntervalBlocks) throw new ProtocolError(E.params, "probe interval out of range");
+    const minBlocks = minDurationBlocks(a.minUptimeBps, a.probeIntervalBlocks, this.cfg.claimGrace);
+    if (a.durationBlocks < minBlocks) {
+      throw new ProtocolError(E.params, `term too short: this uptime target and probe interval need at least ${minBlocks} blocks for a claim to be establishable inside the term`);
+    }
     const premium = quotePremium(a.coverage, a.durationBlocks, a.minUptimeBps);
     if (value < premium) throw new ProtocolError(E.expected, `premium ${premium} not covered by value ${value}`);
 
@@ -364,7 +376,7 @@ export class SimProtocol {
       coverage: a.coverage, premium, createdAt: this.now, activeFrom, expiresAt: activeFrom + durationSecs,
       status: "ACTIVE", samplesTotal: 0, samplesOk: 0, uptimeBps: 10_000, inconclusiveRounds: 0, downtimeSecs: 0,
       consecutiveFailures: 0, outageStartedAt: 0, outageBlocks: 0, baselineOk: false,
-      lastProbeAt: 0, lastBlock: 0, lastRefHead: 0, lastReason: "", lastOk: false, settleAt: 0, claimCount: 0,
+      lastProbeAt: 0, lastBlock: 0, lastRefHead: 0, lastReason: "", lastOk: false, breachAt: 0, settleAt: 0, claimCount: 0,
       payout: 0n, released: 0n, releasable: 0n, vestStart: 0,
     });
     this.durations.set(id, durationSecs);
@@ -394,9 +406,9 @@ export class SimProtocol {
       this.log(id, "POLICY_EXPIRED", "", "term ended with no confirmed breach");
       return "EXPIRED";
     }
-    if (p.status === "BREACH_PENDING" && this.now > p.settleAt + SETTLE_WINDOW) {
+    if (p.status === "BREACH_PENDING" && (this.now >= p.expiresAt || this.now > p.settleAt + SETTLE_WINDOW)) {
       this.close(id, "LAPSED");
-      this.log(id, "CLAIM_LAPSED", "", "staged claim not settled within the settlement window");
+      this.log(id, "CLAIM_LAPSED", "", "staged claim not confirmed inside the policy term or settlement window");
       return "LAPSED";
     }
     throw new ProtocolError(E.state, "policy cannot be expired yet");
@@ -529,6 +541,7 @@ export class SimProtocol {
       if (obs.verdict === "HEALTHY") {
         p.samplesOk += 1;
         p.consecutiveFailures = 0;
+        this.lastFailAt.set(id, 0);
         p.outageStartedAt = 0;
         this.outageStartHead.set(id, 0);
         p.baselineOk = true;
@@ -536,11 +549,15 @@ export class SimProtocol {
         this.poolAssets += forfeit;
         this.totalBondForfeits += forfeit;
       } else {
-        if (p.consecutiveFailures === 0) {
+        let streak = p.consecutiveFailures;
+        // Unobserved time is never turned into downtime: a silence longer than the gap limit starts a new outage.
+        if (streak > 0 && this.now - (this.lastFailAt.get(id) ?? 0) > MAX_PROBE_GAP_SECS) streak = 0;
+        if (streak === 0) {
           p.outageStartedAt = this.now;
           this.outageStartHead.set(id, obs.refHead);
         }
-        p.consecutiveFailures += 1;
+        p.consecutiveFailures = streak + 1;
+        this.lastFailAt.set(id, this.now);
         p.downtimeSecs += p.probeInterval;
       }
       staged = this.maybeStage(id, p, obs.refHead);
@@ -558,7 +575,9 @@ export class SimProtocol {
     if (blocks < MIN_OUTAGE_BLOCKS) return false;
     const up = this.uptimeAt(p, this.now);
     if (up >= p.minUptimeBps) return false;
+    if (this.now + this.cfg.claimGrace >= p.expiresAt) return false; // its re-verification could not fall inside the term
     p.status = "BREACH_PENDING";
+    p.breachAt = this.now;
     p.settleAt = this.now + this.cfg.claimGrace;
     p.claimCount += 1;
     this.reservedPayouts += p.coverage;
@@ -573,13 +592,15 @@ export class SimProtocol {
     if (p.status !== "BREACH_PENDING") throw new ProtocolError(E.state, "no staged claim on this policy");
     if (this.now < p.settleAt) throw new ProtocolError(E.soon, "claim grace period has not elapsed");
     if (this.now > p.settleAt + SETTLE_WINDOW) throw new ProtocolError(E.state, "claim lapsed; call expire_policy");
+    if (this.now >= p.expiresAt) throw new ProtocolError(E.state, "policy term has ended; the claim lapsed, call expire_policy");
     if (bond < this.cfg.probeBond) throw new ProtocolError(E.expected, `probe bond ${this.cfg.probeBond} required`);
     const { leader: obs, votes } = this.consensus(p);
     if (obs.verdict === "INCONCLUSIVE") throw new ProtocolError(E.inconclusive, "re-verification could not be corroborated; retry");
     const text = this.describe(obs);
 
     if (obs.verdict === "FAILING") {
-      let payout = vestedPayout(p.coverage, this.now - p.activeFrom);
+      // The age-ramp is frozen where the breach was staged: waiting to settle must not raise the payout.
+      let payout = vestedPayout(p.coverage, p.breachAt - p.activeFrom);
       if (payout > this.poolAssets) payout = this.poolAssets;
       // Claim velocity ceiling; the first confirmation of an epoch is always allowed (progress guarantee).
       const [paidNow, ceiling] = this.velocityWindow(this.now, this.poolAssets);
@@ -619,6 +640,7 @@ export class SimProtocol {
     this.reservedPayouts -= p.coverage;
     p.status = "ACTIVE";
     p.consecutiveFailures = 0;
+    this.lastFailAt.set(id, 0);
     p.outageStartedAt = 0;
     this.outageStartHead.set(id, 0);
     p.lastOk = true;
